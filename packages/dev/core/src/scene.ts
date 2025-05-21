@@ -51,7 +51,7 @@ import { InputManager } from "./Inputs/scene.inputManager";
 import { PerfCounter } from "./Misc/perfCounter";
 import type { IFileRequest } from "./Misc/fileRequest";
 import { Color4, Color3 } from "./Maths/math.color";
-import type { Plane } from "./Maths/math.plane";
+import { Plane } from "./Maths/math.plane";
 import { Frustum } from "./Maths/math.frustum";
 import { UniqueIdGenerator } from "./Misc/uniqueIdGenerator";
 import type { LoadFileError, RequestFileError, ReadFileError } from "./Misc/fileTools";
@@ -1440,7 +1440,14 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
     public _forcedViewPosition: Nullable<Vector3>;
 
     /** @internal */
-    public _frustumPlanes: Plane[];
+    public _frustumPlanes: Plane[] = [
+        new Plane(0, 0, 0, 0),
+        new Plane(0, 0, 0, 0),
+        new Plane(0, 0, 0, 0),
+        new Plane(0, 0, 0, 0),
+        new Plane(0, 0, 0, 0),
+        new Plane(0, 0, 0, 0),
+    ];
     /**
      * Gets the list of frustum planes (built from the active camera)
      */
@@ -2374,11 +2381,7 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
         this._viewMatrix.multiplyToRef(this._projectionMatrix, this._transformMatrix);
 
         // Update frustum
-        if (!this._frustumPlanes) {
-            this._frustumPlanes = Frustum.GetPlanes(this._transformMatrix);
-        } else {
-            Frustum.GetPlanesToRef(this._transformMatrix, this._frustumPlanes);
-        }
+        Frustum.GetPlanesToRef(this._transformMatrix, this._frustumPlanes);
 
         if (this._multiviewSceneUbo && this._multiviewSceneUbo.useUbo) {
             this._updateMultiviewUbo(viewR, projectionR);
@@ -3921,9 +3924,7 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
                 return;
             }
 
-            if (!this._frustumPlanes) {
-                this.updateTransformMatrix();
-            }
+            this.updateTransformMatrix();
 
             this._evaluateActiveMeshes();
             this._activeMeshesFrozen = true;
@@ -4028,6 +4029,13 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
         // Determine mesh candidates
         const meshes = this.getActiveMeshCandidates();
 
+        const frustumPlanes = this._frustumPlanes;
+        const skipFrustumClipping = this._skipFrustumClipping;
+        const camera = this.activeCamera;
+        const cameraLayerMask = camera.layerMask;
+        const activeMeshes = this._activeMeshes;
+        const cameraActiveMeshes = camera._activeMeshes;
+
         // Check each mesh
         const len = meshes.length;
         for (let i = 0; i < len; i++) {
@@ -4051,7 +4059,7 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
             }
 
             // Switch to current LOD
-            let meshToRender = this.customLODSelector ? this.customLODSelector(mesh, this.activeCamera) : mesh.getLOD(this.activeCamera);
+            let meshToRender = this.customLODSelector ? this.customLODSelector(mesh, camera) : mesh.getLOD(camera);
             mesh._internalAbstractMeshDataInfo._currentLOD = meshToRender;
             mesh._internalAbstractMeshDataInfo._currentLODIsUpToDate = true;
             if (meshToRender === undefined || meshToRender === null) {
@@ -4068,11 +4076,11 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
             if (
                 mesh.isVisible &&
                 mesh.visibility > 0 &&
-                (mesh.layerMask & this.activeCamera.layerMask) !== 0 &&
-                (this._skipFrustumClipping || mesh.alwaysSelectAsActiveMesh || mesh.isInFrustum(this._frustumPlanes))
+                (mesh.layerMask & cameraLayerMask) !== 0 &&
+                (skipFrustumClipping || mesh.alwaysSelectAsActiveMesh || mesh.isInFrustum(frustumPlanes))
             ) {
-                this._activeMeshes.push(mesh);
-                this.activeCamera._activeMeshes.push(mesh);
+                activeMeshes.push(mesh);
+                cameraActiveMeshes.push(mesh);
 
                 if (meshToRender !== mesh) {
                     meshToRender._activate(this._renderId, false);
