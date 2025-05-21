@@ -239,24 +239,34 @@ Mesh.prototype._thinInstanceCreateMatrixBuffer = function (kind: string, buffer:
 };
 
 Mesh.prototype.thinInstanceSetBuffer = function (kind: string, buffer: Nullable<Float32Array>, stride: number = 0, staticBuffer: boolean = true): void {
-    stride = stride || 16;
+    const strideVal = stride || 16;
+    const bufferLength = buffer ? buffer.length : 0;
 
     if (kind === "matrix") {
-        this._thinInstanceDataStorage.matrixBuffer?.dispose();
-        this._thinInstanceDataStorage.matrixBuffer = null;
-        this._thinInstanceDataStorage.matrixBufferSize = buffer ? buffer.length : 32 * stride;
-        this._thinInstanceDataStorage.matrixData = buffer;
-        this._thinInstanceDataStorage.worldMatrices = null;
+        const storage = this._thinInstanceDataStorage;
+        storage.matrixBuffer?.dispose();
+        storage.matrixBuffer = null;
+        if (buffer !== null) {
+            if (!storage.matrixData || storage.matrixBufferSize < bufferLength) {
+                storage.matrixBufferSize = bufferLength;
+                storage.matrixData = new Float32Array(storage.matrixBufferSize);
+            }
+            storage.matrixData.set(buffer);
+        } else {
+            storage.matrixData = null;
+            storage.matrixBufferSize = 32 * strideVal;
+        }
+        storage.worldMatrices = null;
 
         if (buffer !== null) {
-            this._thinInstanceDataStorage.instancesCount = buffer.length / stride;
-            this._thinInstanceDataStorage.matrixBuffer = this._thinInstanceCreateMatrixBuffer("world", buffer, staticBuffer);
+            storage.instancesCount = bufferLength / strideVal;
+            storage.matrixBuffer = this._thinInstanceCreateMatrixBuffer("world", storage.matrixData!, staticBuffer);
 
             if (!this.doNotSyncBoundingInfo) {
                 this.thinInstanceRefreshBoundingInfo(false);
             }
         } else {
-            this._thinInstanceDataStorage.instancesCount = 0;
+            storage.instancesCount = 0;
             if (!this.doNotSyncBoundingInfo) {
                 // mesh has no more thin instances, so need to recompute the bounding box because it's the regular mesh that will now be displayed
                 this.refreshBoundingInfo();
@@ -288,9 +298,9 @@ Mesh.prototype.thinInstanceSetBuffer = function (kind: string, buffer: Nullable<
             this._thinInstanceInitializeUserStorage();
 
             this._userThinInstanceBuffersStorage.data[kind] = buffer;
-            this._userThinInstanceBuffersStorage.strides[kind] = stride;
-            this._userThinInstanceBuffersStorage.sizes[kind] = buffer.length;
-            this._userThinInstanceBuffersStorage.vertexBuffers[kind] = new VertexBuffer(this.getEngine(), buffer, kind, !staticBuffer, false, stride, true);
+            this._userThinInstanceBuffersStorage.strides[kind] = strideVal;
+            this._userThinInstanceBuffersStorage.sizes[kind] = bufferLength;
+            this._userThinInstanceBuffersStorage.vertexBuffers[kind] = new VertexBuffer(this.getEngine(), buffer, kind, !staticBuffer, false, strideVal, true);
 
             this.setVerticesBuffer(this._userThinInstanceBuffersStorage.vertexBuffers[kind]!);
         }
