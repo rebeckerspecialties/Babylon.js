@@ -110,5 +110,9 @@
         "nextVersion": "Unreleased",
         "ignoreCommitters": [],
         "feature": "New Feature"
+    },
+    "dependencies": {
+        "@jest/types": "^29.6.3",
+        "@types/node": "^24.1.0"
     }
 }

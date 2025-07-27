@@ -1025,9 +1025,14 @@ export class Material implements IAnimatable, IClipPlanesHolder {
      */
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     public isReadyForSubMesh(mesh: AbstractMesh, subMesh: SubMesh, useInstances?: boolean): boolean {
-        const defines = subMesh.materialDefines;
+        const drawWrapper = subMesh._getDrawWrapper(undefined, true)!;
+        const defines = drawWrapper.defines as MaterialDefines;
         if (!defines) {
             return false;
+        }
+
+        if (drawWrapper.effect?.isReady()) {
+            return true;
         }
 
         this._eventInfo.isReadyForSubMesh = true;
@@ -1250,6 +1255,9 @@ export class Material implements IAnimatable, IClipPlanesHolder {
      */
     public bindForSubMesh(world: Matrix, mesh: Mesh, subMesh: SubMesh): void {
         const drawWrapper = subMesh._drawWrapper;
+        if (!drawWrapper) {
+            return;
+        }
 
         this._eventInfo.subMesh = subMesh;
         this._callbackPluginEventBindForSubMesh(this._eventInfo);

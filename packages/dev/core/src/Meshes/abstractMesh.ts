@@ -194,6 +194,7 @@ class _FacetDataStorage {
  **/
 // eslint-disable-next-line @typescript-eslint/naming-convention
 class _InternalAbstractMeshDataInfo {
+    public _renderingData: any = {};
     public _hasVertexAlpha = false;
     public _useVertexColors = true;
     public _numBoneInfluencers = 4;

@@ -1410,6 +1410,7 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
     public dispatchAllSubMeshesOfActiveMeshes: boolean = false;
     private _activeMeshes = new SmartArray<AbstractMesh>(256);
     private _processedMaterials = new SmartArray<Material>(256);
+    private _processedMeshes = new SmartArray<AbstractMesh>(256);
     private _renderTargets = new SmartArrayNoDuplicate<RenderTargetTexture>(256);
     private _materialsRenderTargets = new SmartArrayNoDuplicate<RenderTargetTexture>(256);
     /** @internal */
@@ -3979,6 +3980,7 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
                 this._activeMeshes.reset();
                 this._renderingManager.reset();
                 this._processedMaterials.reset();
+        this._processedMeshes.reset();
                 this._activeParticleSystems.reset();
                 this._activeSkeletons.reset();
                 this._softwareSkinnedMeshes.reset();
@@ -4017,6 +4019,7 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
         this._activeMeshes.reset();
         this._renderingManager.reset();
         this._processedMaterials.reset();
+        this._processedMeshes.reset();
         this._activeParticleSystems.reset();
         this._activeSkeletons.reset();
         this._softwareSkinnedMeshes.reset();
@@ -4040,16 +4043,25 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
         const len = meshes.length;
         for (let i = 0; i < len; i++) {
             const mesh = meshes.data[i];
-            mesh._internalAbstractMeshDataInfo._currentLODIsUpToDate = false;
+            const renderingData = mesh._internalAbstractMeshDataInfo._renderingData;
+            renderingData.isReady = false;
+            renderingData.currentLODIsUpToDate = false;
+
             if (mesh.isBlocked) {
+                renderingData.isBlocked = true;
                 continue;
             }
+
+            renderingData.isBlocked = false;
 
             this._totalVertices.addCount(mesh.getTotalVertices(), false);
 
-            if (!mesh.isReady() || !mesh.isEnabled() || mesh.scaling.hasAZeroComponent) {
+            if (!mesh.isEnabled() || !mesh.isVisible || mesh.visibility === 0 || mesh.scaling.hasAZeroComponent) {
                 continue;
             }
+
+            renderingData.isReady = true;
+            this._processedMeshes.push(mesh);
 
             mesh.computeWorldMatrix();
 
@@ -4060,8 +4072,8 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
 
             // Switch to current LOD
             let meshToRender = this.customLODSelector ? this.customLODSelector(mesh, camera) : mesh.getLOD(camera);
-            mesh._internalAbstractMeshDataInfo._currentLOD = meshToRender;
-            mesh._internalAbstractMeshDataInfo._currentLODIsUpToDate = true;
+            renderingData.currentLOD = meshToRender;
+            renderingData.currentLODIsUpToDate = true;
             if (meshToRender === undefined || meshToRender === null) {
                 continue;
             }
@@ -4073,12 +4085,7 @@ export class Scene extends AbstractScene implements IAnimatable, IClipPlanesHold
 
             mesh._preActivate();
 
-            if (
-                mesh.isVisible &&
-                mesh.visibility > 0 &&
-                (mesh.layerMask & cameraLayerMask) !== 0 &&
-                (skipFrustumClipping || mesh.alwaysSelectAsActiveMesh || mesh.isInFrustum(frustumPlanes))
-            ) {
+            if ((mesh.layerMask & cameraLayerMask) !== 0 && (skipFrustumClipping || mesh.alwaysSelectAsActiveMesh || mesh.isInFrustum(frustumPlanes))) {
                 activeMeshes.push(mesh);
                 cameraActiveMeshes.push(mesh);
 

@@ -6,6 +6,7 @@
         "outDir": "./dist",
         "rootDir": "./src",
         "skipLibCheck": true,
+        "lib": ["es2022", "dom"],
         "paths": {
             "core/*": ["dev/core/src/*"]
         }
