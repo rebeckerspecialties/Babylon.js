@@ -18,6 +18,7 @@ import { RegisterClass } from "core/Misc/typeStore";
 import { Color4 } from "core/Maths/math.color";
 import { EffectFallbacks } from "core/Materials/effectFallbacks";
 import { Constants } from "core/Engines/constants";
+import { ShaderLanguage } from "core/Materials/shaderLanguage";
 
 import "./shaders/fluentBackplate.fragment";
 import "./shaders/fluentBackplate.vertex";
@@ -42,6 +43,8 @@ class FluentBackplateMaterialDefines extends MaterialDefines {
  * Class used to render square buttons with fluent design
  */
 export class FluentBackplateMaterial extends PushMaterial {
+    private _shadersLoaded = false;
+
     /**
      * URL pointing to the texture used to define the coloring for the fluent blob effect.
      */
@@ -371,6 +374,7 @@ export class FluentBackplateMaterial extends PushMaterial {
                 samplers: samplers,
                 defines: defines,
                 maxSimultaneousLights: 4,
+                shaderLanguage: this._shaderLanguage,
             });
 
             subMesh.setEffect(
@@ -386,6 +390,16 @@ export class FluentBackplateMaterial extends PushMaterial {
                         onCompiled: this.onCompiled,
                         onError: this.onError,
                         indexParameters: { maxSimultaneousLights: 4 },
+                        shaderLanguage: this._shaderLanguage,
+                        extraInitializationsAsync: this._shadersLoaded
+                            ? undefined
+                            : async () => {
+                                  if (this.shaderLanguage === ShaderLanguage.WGSL) {
+                                      await Promise.all([import("./wgsl/fluentBackplate.vertex"), import("./wgsl/fluentBackplate.fragment")]);
+                                  }
+
+                                  this._shadersLoaded = true;
+                              },
                     },
                     engine
                 ),
