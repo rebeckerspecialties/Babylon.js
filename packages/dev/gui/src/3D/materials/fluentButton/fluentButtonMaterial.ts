@@ -573,6 +573,10 @@ export class FluentButtonMaterial extends PushMaterial {
         return [];
     }
 
+    /**
+     * Disposes the material.
+     * @param forceDisposeEffect specifies if effects should be forcefully disposed
+     */
     public override dispose(forceDisposeEffect?: boolean): void {
         super.dispose(forceDisposeEffect);
     }
@@ -592,6 +596,13 @@ export class FluentButtonMaterial extends PushMaterial {
     }
 
     // Statics
+    /**
+     * Creates a fluent button material from parsed material data.
+     * @param source defines the JSON representation of the material
+     * @param scene defines the hosting scene
+     * @param rootUrl defines the root URL to use to load textures and relative dependencies
+     * @returns a new fluent button material
+     */
     public static override Parse(source: any, scene: Scene, rootUrl: string): FluentButtonMaterial {
         return SerializationHelper.Parse(() => new FluentButtonMaterial(source.name, scene), source, scene, rootUrl);
     }

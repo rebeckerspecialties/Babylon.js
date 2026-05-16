@@ -105,11 +105,11 @@ fn main(input: VertexInputs) -> FragmentInputs {
     let ratio: f32 = min(1.0, vertexInputs.age / vertexInputs.life);
 #ifdef COLORGRADIENTS
 #ifdef COLORGRADIENTS_COLOR2
-    let vColor1: vec4f = textureSample(colorGradientSampler, colorGradientSamplerSampler, vec2f(ratio, 0.25));
-    let vColor2: vec4f = textureSample(colorGradientSampler, colorGradientSamplerSampler, vec2f(ratio, 0.75));
+    let vColor1: vec4f = textureSampleLevel(colorGradientSampler, colorGradientSamplerSampler, vec2f(ratio, 0.25), 0.0);
+    let vColor2: vec4f = textureSampleLevel(colorGradientSampler, colorGradientSamplerSampler, vec2f(ratio, 0.75), 0.0);
     vertexOutputs.vColor = mix(vColor1, vColor2, vertexInputs.seed.x);
 #else
-    vertexOutputs.vColor = textureSample(colorGradientSampler, colorGradientSamplerSampler, vec2f(ratio, 0.0));
+    vertexOutputs.vColor = textureSampleLevel(colorGradientSampler, colorGradientSamplerSampler, vec2f(ratio, 0.0), 0.0);
 #endif
 #else
     vertexOutputs.vColor = vertexInputs.color * vec4f(1.0 - ratio) + uniforms.colorDead * vec4f(ratio);

@@ -716,6 +716,10 @@ export class Effect implements IDisposable {
         return this._rawFragmentSourceCode;
     }
 
+    /**
+     * Gets the pipeline generation options for this effect.
+     * @returns the pipeline generation options for this effect
+     */
     public getPipelineGenerationOptions(): IPipelineGenerationOptions {
         return {
             platformName: this._engine.shaderPlatformName,
