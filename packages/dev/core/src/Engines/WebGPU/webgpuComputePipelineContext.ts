@@ -15,6 +15,8 @@ export class WebGPUComputePipelineContext implements IComputePipelineContext {
 
     public computePipeline: GPUComputePipeline;
 
+    public computePipelineLayoutKey: string;
+
     // eslint-disable-next-line no-restricted-syntax
     public get isAsync() {
         return false;
@@ -36,6 +38,7 @@ export class WebGPUComputePipelineContext implements IComputePipelineContext {
     constructor(engine: WebGPUEngine) {
         this._name = "unnamed";
         this.engine = engine;
+        this.computePipelineLayoutKey = "";
     }
 
     public _getComputeShaderCode(): string | null {
