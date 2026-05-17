@@ -152,8 +152,8 @@ fn roundRectVertex(uv: vec2f, radius: f32, margin: f32, anisotropy: f32, gradien
     return array<vec4f, 2>(vec4f(rectUV, lineUV), rectParms);
 }
 
-fn lineVertex(uv: vec2f, rate: f32, highlightTransform: vec4f) -> vec3f {
-    let angle2: f32 = rate * 2.0 * 3.1416;
+fn lineVertex(uv: vec2f, time: f32, rate: f32, highlightTransform: vec4f) -> vec3f {
+    let angle2: f32 = (rate * time) * 2.0 * 3.1416;
     let sinAngle2: f32 = sin(angle2);
     let cosAngle2: f32 = cos(angle2);
     let xformUV: vec2f = uv * highlightTransform.xy + highlightTransform.zw;
@@ -208,7 +208,7 @@ fn main(input: VertexInputs) -> FragmentInputs {
 #endif
 
     let rectData: array<vec4f, 2> = roundRectVertex(newUV, radius, 0.0, anisotropy, edgeGradient.x, edgeGradient.y);
-    let lineVx: vec3f = lineVertex(rectData[0].zw, uniforms._Rate_, uniforms._Highlight_Transform_);
+    let lineVx: vec3f = lineVertex(rectData[0].zw, 0.0, uniforms._Rate_, uniforms._Highlight_Transform_);
 
     vertexOutputs.position = uniforms.viewProjection * vec4f(positionWorld, 1.0);
     vertexOutputs.vPosition = positionWorld;
