@@ -4,8 +4,10 @@ import { EngineStore } from "../../../Engines/engineStore";
 import { type Texture } from "../../../Materials/Textures/texture";
 import { ProceduralTexture } from "./proceduralTexture";
 import { RegisterClass } from "../../../Misc/typeStore";
+import { ShaderLanguage } from "../../../Materials/shaderLanguage";
 
 import "../../../Shaders/noise.fragment";
+import "../../../ShadersWGSL/noise.fragment";
 
 /**
  * Class used to generate noise procedural textures
@@ -35,7 +37,17 @@ export class NoiseProceduralTexture extends ProceduralTexture {
      * @param generateMipMaps defines if mipmaps must be generated (true by default)
      */
     constructor(name: string, size: number = 256, scene: Nullable<Scene> = EngineStore.LastCreatedScene, fallbackTexture?: Texture, generateMipMaps?: boolean) {
-        super(name, size, "noise", scene, fallbackTexture, generateMipMaps);
+        super(
+            name,
+            size,
+            "noise",
+            scene,
+            {
+                fallbackTexture,
+                shaderLanguage: scene?.getEngine().isWebGPU ? ShaderLanguage.WGSL : ShaderLanguage.GLSL,
+            },
+            generateMipMaps
+        );
         this.autoClear = false;
         this._updateShaderUniforms();
     }
