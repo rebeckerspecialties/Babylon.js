@@ -2552,6 +2552,157 @@ test.describe("Flow Graph Editor — Graph Tabs Preview Files and glTF Import", 
         expect(await StrictImportKhrInteractivityAsync(page, "scene-procedure.glb", readFileSync(path!))).toEqual({ graphCount: 1, errorCount: 0 });
     });
 
+    test("authors a source-preserving sphere zone that reacts to boundary crossings", async ({ page }, testInfo) => {
+        test.setTimeout(90_000);
+        const { bytes, document } = BuildExistingGlbFixture(false, false, false, true);
+        const fge = new FlowGraphEditorPage(page);
+        await fge.goto({ local: true });
+        await fge.assertEditorReady();
+        await page.evaluate(
+            (data) => {
+                const file = new File([new Uint8Array(data)], "zone.glb", { type: "model/gltf-binary" });
+                const transfer = new DataTransfer();
+                transfer.items.add(file);
+                (document.querySelector("canvas") ?? document.body).dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+            },
+            [...bytes]
+        );
+        await expect.poll(async () => (await GetSceneContextSnapshot(page))?.source).toBe("file");
+        await page.getByRole("button", { name: "New behavior" }).click();
+        await page.getByRole("combobox", { name: "Behavior type" }).click();
+        await page.getByRole("option", { name: "Sphere trigger zone" }).click();
+        for (const [label, index] of [
+            ["Zone center", 1],
+            ["Tracked point", 2],
+            ["Inside-zone cue", 3],
+        ] as const) {
+            await page.getByRole("combobox", { name: label }).click();
+            await page.getByRole("option", { name: new RegExp(`glTF node ${index}\\)`) }).click();
+        }
+        await page.getByRole("spinbutton", { name: "Radius" }).fill("0");
+        await expect(page.getByRole("button", { name: "Create behavior" })).toBeDisabled();
+        await page.getByRole("spinbutton", { name: "Radius" }).fill("1");
+        await expect(page.getByRole("button", { name: "Create behavior" })).toBeEnabled();
+        await page.screenshot({ path: testInfo.outputPath("khr-sphere-zone-dialog.png"), fullPage: true });
+        const downloadPromise = page.waitForEvent("download", (download) => download.suggestedFilename() === "zone-behavior.glb");
+        await page.getByRole("button", { name: "Create behavior" }).click();
+        const path = await (await downloadPromise).path();
+        const authoredBytes = readFileSync(path!);
+        const jsonLength = authoredBytes.readUInt32LE(12);
+        const authored = JSON.parse(authoredBytes.subarray(20, 20 + jsonLength).toString("utf8"));
+        expect(authoredBytes.subarray(20 + jsonLength)).toEqual(bytes.subarray(20 + bytes.readUInt32LE(12)));
+        expect(authored.nodes.map((node: any) => ({ name: node.name, extras: node.extras, children: node.children }))).toEqual(
+            document.nodes.map((node: any) => ({ name: node.name, extras: node.extras, children: node.children }))
+        );
+        expect(await StrictImportKhrInteractivityAsync(page, "strict-zone.glb", authoredBytes)).toEqual({ graphCount: 1, errorCount: 0 });
+        await expect.poll(async () => await fge.getGraphNames()).toEqual(["Sphere trigger zone"]);
+        const cueVisible = () =>
+            page.evaluate(() => {
+                const state = (globalThis as any).BABYLON.FlowGraphEditor._CurrentState;
+                return state.khrInteractivityImportResult.glTF.nodes[3]._primitiveBabylonMeshes[0].isVisible;
+            });
+        const moveTracked = async (x: number) =>
+            page.evaluate((position) => {
+                const state = (globalThis as any).BABYLON.FlowGraphEditor._CurrentState;
+                state.khrInteractivityImportResult.glTF.nodes[2]._babylonTransformNode.position.x = position;
+                state.sceneContext.scene.render();
+            }, x);
+        await ClickGraphControl(page, "Start");
+        await WaitForGraphState(page, "Running");
+        expect(await cueVisible()).toBe(false);
+        await moveTracked(0.5);
+        await expect.poll(cueVisible).toBe(true);
+        await moveTracked(1);
+        expect(await cueVisible()).toBe(true);
+        await moveTracked(1.5);
+        await expect.poll(cueVisible).toBe(false);
+        await moveTracked(0);
+        await expect.poll(cueVisible).toBe(true);
+        await ClickGraphControl(page, "Reset");
+        await WaitForGraphState(page, "Stopped");
+        await expect.poll(cueVisible).toBe(false);
+        expect(
+            await page.evaluate(() => (globalThis as any).BABYLON.FlowGraphEditor._CurrentState.khrInteractivityImportResult.glTF.nodes[2]._babylonTransformNode.position.x)
+        ).toBe(0);
+        await ClickGraphControl(page, "Start");
+        await WaitForGraphState(page, "Running");
+        await expect.poll(cueVisible).toBe(true);
+    });
+
+    test("creates a sphere zone from a new scene and round-trips its graph", async ({ page }) => {
+        test.setTimeout(90_000);
+        const fge = new FlowGraphEditorPage(page);
+        await fge.goto({ local: true });
+        await fge.assertEditorReady();
+        await page.getByRole("button", { name: "New behavior" }).click();
+        await page.getByRole("combobox", { name: "Behavior type" }).click();
+        await page.getByRole("option", { name: "Sphere trigger zone" }).click();
+        for (const [label, name] of [
+            ["Zone center", "box"],
+            ["Tracked point", "sphere"],
+            ["Inside-zone cue", "cylinder"],
+        ] as const) {
+            await page.getByRole("combobox", { name: label }).click();
+            await page.getByRole("option", { name: new RegExp(`^${name} \\(#`) }).click();
+        }
+        await page.getByRole("spinbutton", { name: "Radius" }).fill("1.5");
+        await expect(page.getByRole("button", { name: "Create behavior" })).toBeEnabled();
+        await page.getByRole("button", { name: "Create behavior" }).click();
+        await expect.poll(async () => await fge.getGraphNames()).toEqual(["Sphere trigger zone"]);
+        const downloadPromise = page.waitForEvent("download", { predicate: (download) => download.suggestedFilename().endsWith(".glb"), timeout: 15_000 });
+        await page.getByRole("button", { name: "Export KHR GLB", exact: true }).click();
+        const path = await (await downloadPromise).path();
+        expect(await StrictImportKhrInteractivityAsync(page, "scene-zone.glb", readFileSync(path!))).toEqual({ graphCount: 1, errorCount: 0 });
+    });
+
+    test("authors a sphere zone with touch on a narrow viewport", async ({ browser }, testInfo) => {
+        test.setTimeout(90_000);
+        const context = await browser.newContext({ ...devices["Pixel 7"], acceptDownloads: true });
+        try {
+            const page = await context.newPage();
+            const fge = new FlowGraphEditorPage(page);
+            await fge.goto({ local: true });
+            await fge.assertEditorReady();
+            const { bytes } = BuildExistingGlbFixture(false, false, false, true);
+            await page.evaluate(
+                (data) => {
+                    const file = new File([new Uint8Array(data)], "touch-zone.glb", { type: "model/gltf-binary" });
+                    const transfer = new DataTransfer();
+                    transfer.items.add(file);
+                    (document.querySelector("canvas") ?? document.body).dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+                },
+                [...bytes]
+            );
+            await expect.poll(async () => (await GetSceneContextSnapshot(page))?.source).toBe("file");
+            await page.getByRole("button", { name: "New behavior" }).tap();
+            await page.getByRole("combobox", { name: "Behavior type" }).tap();
+            await page.getByRole("option", { name: "Sphere trigger zone" }).tap();
+            const dialog = page.getByRole("dialog", { name: "New glTF sphere trigger zone" });
+            await expect(dialog).toBeInViewport();
+            const bounds = await dialog.boundingBox();
+            expect(bounds).not.toBeNull();
+            expect(bounds!.x).toBeGreaterThanOrEqual(0);
+            expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+            for (const [label, index] of [
+                ["Zone center", 1],
+                ["Tracked point", 2],
+                ["Inside-zone cue", 3],
+            ] as const) {
+                await page.getByRole("combobox", { name: label }).tap();
+                await page.getByRole("option", { name: new RegExp(`glTF node ${index}\\)`) }).tap();
+            }
+            await page.getByRole("spinbutton", { name: "Radius" }).fill("1");
+            await expect(page.getByRole("button", { name: "Create behavior" })).toBeEnabled();
+            await page.screenshot({ path: testInfo.outputPath("khr-sphere-zone-touch.png"), fullPage: true });
+            const downloadPromise = page.waitForEvent("download", { timeout: 15_000 });
+            await page.getByRole("button", { name: "Create behavior" }).tap();
+            expect((await downloadPromise).suggestedFilename()).toBe("touch-zone-behavior.glb");
+            await expect.poll(async () => await fge.getGraphNames()).toEqual(["Sphere trigger zone"]);
+        } finally {
+            await context.close();
+        }
+    });
+
     test("does not silently take over animations while authoring from a new scene", async ({ page }) => {
         const fge = new FlowGraphEditorPage(page);
         await fge.goto({ local: true });

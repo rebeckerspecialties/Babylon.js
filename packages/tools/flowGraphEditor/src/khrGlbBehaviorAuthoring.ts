@@ -1,6 +1,7 @@
 import { type Node } from "core/node";
 import { BuildKhrSelectionRevealGraph } from "./khrSelectionRevealTemplate";
 import { BuildKhrTwoStepProcedureGraph, type IKhrTwoStepProcedureNodes } from "./khrTwoStepProcedureTemplate";
+import { BuildKhrTriggerZoneGraph, type IKhrTriggerZoneNodes } from "./khrTriggerZoneTemplate";
 
 const GlbMagic = 0x46546c67;
 const JsonChunk = 0x4e4f534a;
@@ -371,6 +372,93 @@ export function PatchKhrTwoStepProcedureGlb(bytes: Uint8Array, indices: IKhrTwoS
         nextCueVisibility.visible = false;
     } else {
         document.nodes![indices.nextCue].extensions!.KHR_node_visibility = { visible: false };
+    }
+    return _WriteGlb(bytes, document, suffixOffset);
+}
+
+/**
+ * Adds a spherical zone graph using two sibling node translations.
+ * @param bytes original GLB bytes
+ * @param indices stable source glTF node indices for the zone roles
+ * @param radius zone radius in the shared parent coordinate space
+ * @returns the authored GLB bytes
+ */
+export function PatchKhrTriggerZoneGlb(bytes: Uint8Array, indices: IKhrTriggerZoneNodes<number>, radius: number): Uint8Array {
+    const { document, suffixOffset } = _ReadGlb(bytes);
+    const graph = BuildKhrTriggerZoneGraph(indices, radius);
+    if (document.animations !== undefined && (!Array.isArray(document.animations) || document.animations.length > 0)) {
+        throw new Error("Adding a behavior graph would stop the source GLB's animations from playing automatically; animated GLBs need explicit animation behavior.");
+    }
+    const nodes = document.nodes;
+    if (!Array.isArray(nodes) || Object.values(indices).some((index) => index >= nodes.length)) {
+        throw new Error("A trigger-zone glTF node index is outside the source document.");
+    }
+    if (
+        nodes.some((node) => !node || typeof node !== "object" || Array.isArray(node) || (node.extensions !== undefined && !_IsRecord(node.extensions))) ||
+        (document.extensions !== undefined && !_IsRecord(document.extensions)) ||
+        (document.extensionsUsed !== undefined && (!Array.isArray(document.extensionsUsed) || document.extensionsUsed.some((name) => typeof name !== "string"))) ||
+        (document.extensionsRequired !== undefined && (!Array.isArray(document.extensionsRequired) || document.extensionsRequired.some((name) => typeof name !== "string")))
+    ) {
+        throw new Error("The source GLB has malformed nodes or extension declarations.");
+    }
+    if (
+        document.extensions?.KHR_interactivity !== undefined ||
+        document.extensions?.BABYLON_flow_graph !== undefined ||
+        document.extensionsUsed?.includes("KHR_interactivity") ||
+        document.extensionsUsed?.includes("BABYLON_flow_graph")
+    ) {
+        throw new Error("The source GLB already has a behavior graph.");
+    }
+    const parents = new Array<number | undefined>(nodes.length);
+    for (const [parent, node] of nodes.entries()) {
+        if (node.children !== undefined && !Array.isArray(node.children)) {
+            throw new Error("The source GLB has malformed node hierarchy.");
+        }
+        for (const child of node.children ?? []) {
+            if (!Number.isSafeInteger(child) || child < 0 || child >= nodes.length || parents[child] !== undefined) {
+                throw new Error("The source GLB has malformed node hierarchy.");
+            }
+            parents[child] = parent;
+        }
+    }
+    if (parents[indices.zone] !== parents[indices.tracked]) {
+        throw new Error("The zone and tracked glTF nodes must have the same parent coordinate space.");
+    }
+    if (nodes[indices.zone].matrix !== undefined || nodes[indices.tracked].matrix !== undefined) {
+        throw new Error("The zone and tracked glTF nodes must use translation properties, not matrix transforms.");
+    }
+    const cueVisibility = nodes[indices.cue].extensions?.KHR_node_visibility;
+    if (cueVisibility !== undefined && (!_IsRecord(cueVisibility) || (cueVisibility.visible !== undefined && typeof cueVisibility.visible !== "boolean"))) {
+        throw new Error("The trigger-zone cue has malformed visibility.");
+    }
+    const visited = new Set<number>();
+    for (let parent = parents[indices.cue]; parent !== undefined; parent = parents[parent]) {
+        if (visited.has(parent)) {
+            throw new Error("The source GLB has malformed node hierarchy.");
+        }
+        visited.add(parent);
+        const visibility = nodes[parent].extensions?.KHR_node_visibility;
+        if (visibility !== undefined && (!_IsRecord(visibility) || (visibility.visible !== undefined && visibility.visible !== true))) {
+            throw new Error("A trigger-zone cue ancestor disables visibility.");
+        }
+    }
+    document.extensions ??= {};
+    document.extensions.KHR_interactivity = graph;
+    nodes[indices.cue].extensions ??= {};
+    if (_IsRecord(cueVisibility)) {
+        cueVisibility.visible = false;
+    } else {
+        nodes[indices.cue].extensions!.KHR_node_visibility = { visible: false };
+    }
+    for (const extension of ["KHR_interactivity", "KHR_node_visibility"]) {
+        document.extensionsUsed ??= [];
+        document.extensionsRequired ??= [];
+        if (!document.extensionsUsed.includes(extension)) {
+            document.extensionsUsed.push(extension);
+        }
+        if (!document.extensionsRequired.includes(extension)) {
+            document.extensionsRequired.push(extension);
+        }
     }
     return _WriteGlb(bytes, document, suffixOffset);
 }
