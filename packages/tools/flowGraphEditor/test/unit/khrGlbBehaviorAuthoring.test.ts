@@ -5,6 +5,7 @@ import { TransformNode } from "core/Meshes/transformNode";
 import { Scene } from "core/scene";
 import {
     GetGlbNodeIndex,
+    GetGlbNodeParents,
     PatchKhrSelectionRevealGlb,
     PatchKhrTriggerZoneGlb,
     PatchKhrTwoStepProcedureGlb,
@@ -87,6 +88,13 @@ function RichSourceDocument(): RichDocument {
 }
 
 describe("lossless GLB selection behavior authoring", () => {
+    it("resolves source-node parents independently of primitive wrappers", () => {
+        const document = RichSourceDocument();
+        expect(GetGlbNodeParents(document)).toEqual([undefined, 0, 0]);
+        document.nodes[2].children = [1];
+        expect(() => GetGlbNodeParents(document)).toThrow("malformed node hierarchy");
+    });
+
     it("patches a spherical zone without changing source hierarchy, metadata, or chunks", () => {
         const document = RichSourceDocument();
         document.nodes[0].children = [1, 2, 3];
@@ -103,6 +111,22 @@ describe("lossless GLB selection behavior authoring", () => {
         );
         expect(authored.nodes![3].extensions!.KHR_node_visibility).toEqual({ visible: false });
         expect(authored.extensions!.EXT_vendor_meta).toEqual(document.extensions.EXT_vendor_meta);
+    });
+
+    it("keeps large JSON number tokens beside a modified zone cue", () => {
+        const document = RichSourceDocument();
+        document.nodes[0].children = [1, 2, 3];
+        document.nodes.push({ name: "inside cue", mesh: 0, extensions: { KHR_node_visibility: { visible: true, extras: { auditId: "audit-9" } } } });
+        const raw = JSON.stringify(document)
+            .replace('"stableAssetId":"maintenance-asset-9"', '"stableAssetId":9007199254740993')
+            .replace('"auditId":"audit-9"', '"auditId":9007199254740995');
+
+        const authored = JsonText(PatchKhrTriggerZoneGlb(BuildGlb(raw), { zone: 1, tracked: 2, cue: 3 }, 1));
+
+        expect(authored).toContain('"stableAssetId":9007199254740993');
+        expect(authored).toContain('"auditId":9007199254740995');
+        expect(JSON.parse(authored).nodes[3].extensions.KHR_node_visibility.visible).toBe(false);
+        expect(JSON.parse(authored).extensionsUsed).not.toContain("KHR_node_selectability");
     });
 
     it("rejects ambiguous or inert source zones", () => {

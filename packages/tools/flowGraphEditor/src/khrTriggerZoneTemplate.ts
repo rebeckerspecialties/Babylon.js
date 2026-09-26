@@ -1,4 +1,4 @@
-import { type AbstractMesh } from "core/Meshes/abstractMesh";
+import { type TransformNode } from "core/Meshes/transformNode";
 import { type Node } from "core/node";
 
 /** glTF nodes used by a spherical trigger zone. */
@@ -13,24 +13,25 @@ export interface IKhrTriggerZoneNodes<T> {
 
 /**
  * Validates the shared parent space used by the sphere calculation.
- * @param nodes scene meshes assigned to the zone roles
+ * @param nodes scene nodes assigned to the zone roles
  * @param radius zone radius in the nodes' shared parent space
+ * @param checkRuntimeParent whether to compare Babylon parents; imported GLBs use source glTF parents instead
  */
-export function ValidateKhrTriggerZoneMeshes(nodes: IKhrTriggerZoneNodes<AbstractMesh>, radius: number): void {
+export function ValidateKhrTriggerZoneNodes(nodes: IKhrTriggerZoneNodes<TransformNode>, radius: number, checkRuntimeParent = true): void {
     if (!Number.isFinite(radius) || radius <= 0) {
         throw new Error("The zone radius must be a positive finite number.");
     }
     if (new Set(Object.values(nodes)).size !== 3) {
-        throw new Error("Choose three different meshes for the trigger zone.");
+        throw new Error("Choose three different nodes for the trigger zone.");
     }
     if (nodes.zone.getScene() !== nodes.tracked.getScene() || nodes.zone.getScene() !== nodes.cue.getScene()) {
-        throw new Error("Trigger-zone meshes must belong to the same scene.");
+        throw new Error("Trigger-zone nodes must belong to the same scene.");
     }
-    if (nodes.zone.parent !== nodes.tracked.parent) {
+    if (checkRuntimeParent && nodes.zone.parent !== nodes.tracked.parent) {
         throw new Error("The zone and tracked point must have the same parent coordinate space.");
     }
     if (!nodes.zone.isEnabled() || !nodes.tracked.isEnabled() || !nodes.cue.isEnabled()) {
-        throw new Error("Trigger-zone meshes must be enabled.");
+        throw new Error("Trigger-zone nodes must be enabled.");
     }
 }
 
@@ -108,24 +109,24 @@ interface ITriggerZoneExportContext {
 
 /**
  * Creates a KHR_interactivity provider for a new scene's sphere zone.
- * @param meshes scene meshes assigned to the zone roles
+ * @param nodes scene nodes assigned to the zone roles
  * @param radius zone radius in the nodes' shared parent space
  * @returns a KHR_interactivity export provider
  */
-export function CreateKhrTriggerZoneTemplate(meshes: IKhrTriggerZoneNodes<AbstractMesh>, radius: number) {
-    ValidateKhrTriggerZoneMeshes(meshes, radius);
+export function CreateKhrTriggerZoneTemplate(nodes: IKhrTriggerZoneNodes<TransformNode>, radius: number) {
+    ValidateKhrTriggerZoneNodes(nodes, radius);
     return {
         required: true,
         additionalExtensionsUsed: ["KHR_node_visibility"],
         additionalExtensionsRequired: ["KHR_node_visibility"],
         build(context: ITriggerZoneExportContext) {
             const indices = {
-                zone: context.getNodeIndex(meshes.zone),
-                tracked: context.getNodeIndex(meshes.tracked),
-                cue: context.getNodeIndex(meshes.cue),
+                zone: context.getNodeIndex(nodes.zone),
+                tracked: context.getNodeIndex(nodes.tracked),
+                cue: context.getNodeIndex(nodes.cue),
             };
             if (Object.values(indices).some((index) => index === undefined)) {
-                throw new Error("All trigger-zone meshes must be exported as glTF nodes.");
+                throw new Error("All trigger-zone nodes must be exported as glTF nodes.");
             }
             const graph = BuildKhrTriggerZoneGraph(indices as IKhrTriggerZoneNodes<number>, radius);
             context.setNodeExtension(indices.cue!, "KHR_node_visibility", { visible: false });

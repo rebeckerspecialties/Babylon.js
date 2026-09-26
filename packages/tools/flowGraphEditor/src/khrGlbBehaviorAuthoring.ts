@@ -101,6 +101,31 @@ export function ReadGlbDocument(bytes: Uint8Array): IGlbDocument {
 }
 
 /**
+ * Resolves parent indices from the source glTF hierarchy, independent of Babylon primitive wrappers.
+ * @param document parsed glTF document
+ * @returns the parent index for each node, or undefined for root nodes
+ */
+export function GetGlbNodeParents(document: IGlbDocument): Array<number | undefined> {
+    const nodes = document.nodes;
+    if (!Array.isArray(nodes)) {
+        throw new Error("The source GLB has no glTF nodes.");
+    }
+    const parents = new Array<number | undefined>(nodes.length);
+    for (const [parent, node] of nodes.entries()) {
+        if (!node || typeof node !== "object" || Array.isArray(node) || (node.children !== undefined && !Array.isArray(node.children))) {
+            throw new Error("The source GLB has malformed node hierarchy.");
+        }
+        for (const child of node.children ?? []) {
+            if (!Number.isSafeInteger(child) || child < 0 || child >= nodes.length || parents[child] !== undefined) {
+                throw new Error("The source GLB has malformed node hierarchy.");
+            }
+            parents[child] = parent;
+        }
+    }
+    return parents;
+}
+
+/**
  * Finds the glTF node index recorded by the loader, including on an ordinary primitive's immediate parent.
  * @param node loaded Babylon node
  * @param nodeCount number of nodes in the source glTF document
@@ -289,10 +314,11 @@ function _WriteBehaviorGlb(
             write(["nodes", index, "extensions", "KHR_node_visibility", "visible"], false);
         }
     }
+    const requiredExtensions = ["KHR_interactivity", ...(selectableNodes.length ? ["KHR_node_selectability"] : []), ...(hiddenNodes.length ? ["KHR_node_visibility"] : [])];
     for (const key of ["extensionsUsed", "extensionsRequired"] as const) {
         const original = document[key];
         const names = original?.slice() ?? [];
-        for (const name of ["KHR_interactivity", "KHR_node_selectability", "KHR_node_visibility"]) {
+        for (const name of requiredExtensions) {
             if (!names.includes(name)) {
                 if (original) {
                     write([key, names.length], name, true);
@@ -436,7 +462,7 @@ export function PatchKhrTwoStepProcedureGlb(bytes: Uint8Array, indices: IKhrTwoS
  * @returns the authored GLB bytes
  */
 export function PatchKhrTriggerZoneGlb(bytes: Uint8Array, indices: IKhrTriggerZoneNodes<number>, radius: number): Uint8Array {
-    const { document, suffixOffset } = _ReadGlb(bytes);
+    const { document, jsonText, suffixOffset } = _ReadGlb(bytes);
     const graph = BuildKhrTriggerZoneGraph(indices, radius);
     if (document.animations !== undefined && (!Array.isArray(document.animations) || document.animations.length > 0)) {
         throw new Error("Adding a behavior graph would stop the source GLB's animations from playing automatically; animated GLBs need explicit animation behavior.");
@@ -461,18 +487,7 @@ export function PatchKhrTriggerZoneGlb(bytes: Uint8Array, indices: IKhrTriggerZo
     ) {
         throw new Error("The source GLB already has a behavior graph.");
     }
-    const parents = new Array<number | undefined>(nodes.length);
-    for (const [parent, node] of nodes.entries()) {
-        if (node.children !== undefined && !Array.isArray(node.children)) {
-            throw new Error("The source GLB has malformed node hierarchy.");
-        }
-        for (const child of node.children ?? []) {
-            if (!Number.isSafeInteger(child) || child < 0 || child >= nodes.length || parents[child] !== undefined) {
-                throw new Error("The source GLB has malformed node hierarchy.");
-            }
-            parents[child] = parent;
-        }
-    }
+    const parents = GetGlbNodeParents(document);
     if (parents[indices.zone] !== parents[indices.tracked]) {
         throw new Error("The zone and tracked glTF nodes must have the same parent coordinate space.");
     }
@@ -494,23 +509,5 @@ export function PatchKhrTriggerZoneGlb(bytes: Uint8Array, indices: IKhrTriggerZo
             throw new Error("A trigger-zone cue ancestor disables visibility.");
         }
     }
-    document.extensions ??= {};
-    document.extensions.KHR_interactivity = graph;
-    nodes[indices.cue].extensions ??= {};
-    if (_IsRecord(cueVisibility)) {
-        cueVisibility.visible = false;
-    } else {
-        nodes[indices.cue].extensions!.KHR_node_visibility = { visible: false };
-    }
-    for (const extension of ["KHR_interactivity", "KHR_node_visibility"]) {
-        document.extensionsUsed ??= [];
-        document.extensionsRequired ??= [];
-        if (!document.extensionsUsed.includes(extension)) {
-            document.extensionsUsed.push(extension);
-        }
-        if (!document.extensionsRequired.includes(extension)) {
-            document.extensionsRequired.push(extension);
-        }
-    }
-    return _WriteGlb(bytes, document, suffixOffset);
+    return _WriteBehaviorGlb(bytes, document, jsonText, suffixOffset, graph, [], [indices.cue]);
 }
