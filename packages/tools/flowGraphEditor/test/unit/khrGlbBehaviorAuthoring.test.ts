@@ -4,6 +4,7 @@ import { TransformNode } from "core/Meshes/transformNode";
 import { Scene } from "core/scene";
 import {
     GetGlbNodeIndex,
+    GetGlbNodeParents,
     PatchKhrSelectionRevealGlb,
     PatchKhrTriggerZoneGlb,
     PatchKhrTwoStepProcedureGlb,
@@ -81,6 +82,13 @@ function RichSourceDocument(): RichDocument {
 }
 
 describe("lossless GLB selection behavior authoring", () => {
+    it("resolves source-node parents independently of primitive wrappers", () => {
+        const document = RichSourceDocument();
+        expect(GetGlbNodeParents(document)).toEqual([undefined, 0, 0]);
+        document.nodes[2].children = [1];
+        expect(() => GetGlbNodeParents(document)).toThrow("malformed node hierarchy");
+    });
+
     it("patches a spherical zone without changing source hierarchy, metadata, or chunks", () => {
         const document = RichSourceDocument();
         document.nodes[0].children = [1, 2, 3];

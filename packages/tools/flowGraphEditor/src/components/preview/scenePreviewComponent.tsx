@@ -4,6 +4,7 @@ import { type Nullable } from "core/types";
 import { type Observer } from "core/Misc/observable";
 import { type Scene } from "core/scene";
 import { type AbstractMesh } from "core/Meshes/abstractMesh";
+import { type TransformNode } from "core/Meshes/transformNode";
 import "core/Helpers/sceneHelpers";
 import { type Engine } from "core/Engines/engine";
 import { type IKHRInteractivityImportResult } from "loaders/glTF/2.0/Extensions/KHR_interactivity.pure";
@@ -37,8 +38,15 @@ import { IsFlowGraphEventBlockName } from "../../graphSystem/blockTypeColors";
 import { GetFlowGraphBlockNodeId } from "../../graphSystem/blockNodeData";
 import { CreateKhrSelectionRevealTemplate } from "../../khrSelectionRevealTemplate";
 import { CreateKhrTwoStepProcedureTemplate, ValidateKhrTwoStepProcedureMeshes, type IKhrTwoStepProcedureNodes } from "../../khrTwoStepProcedureTemplate";
-import { CreateKhrTriggerZoneTemplate, ValidateKhrTriggerZoneMeshes, type IKhrTriggerZoneNodes } from "../../khrTriggerZoneTemplate";
-import { GetGlbNodeIndex, PatchKhrSelectionRevealGlb, PatchKhrTriggerZoneGlb, PatchKhrTwoStepProcedureGlb, ReadGlbDocument } from "../../khrGlbBehaviorAuthoring";
+import { CreateKhrTriggerZoneTemplate, ValidateKhrTriggerZoneNodes, type IKhrTriggerZoneNodes } from "../../khrTriggerZoneTemplate";
+import {
+    GetGlbNodeIndex,
+    GetGlbNodeParents,
+    PatchKhrSelectionRevealGlb,
+    PatchKhrTriggerZoneGlb,
+    PatchKhrTwoStepProcedureGlb,
+    ReadGlbDocument,
+} from "../../khrGlbBehaviorAuthoring";
 
 interface IScenePreviewComponentProps {
     globalState: GlobalState;
@@ -852,7 +860,7 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
                     const document = ReadGlbDocument(new Uint8Array(await file.arrayBuffer()));
                     if (Array.isArray(document.nodes)) {
                         const hasAnimations = document.animations !== undefined && (!Array.isArray(document.animations) || document.animations.length > 0);
-                        sourceGlb = { file, companionFiles, nodeCount: document.nodes.length, hasAnimations, authoredBehavior };
+                        sourceGlb = { file, companionFiles, nodeCount: document.nodes.length, nodeParents: GetGlbNodeParents(document), hasAnimations, authoredBehavior };
                     }
                 } catch {
                     // The preview can still load files outside this patcher's supported GLB framing.
@@ -1204,14 +1212,15 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
                 ctx?.meshes.find((mesh) => String(mesh.uniqueId) === this.state.procedureMeshIds[role]),
             ])
         ) as unknown as IKhrTwoStepProcedureNodes<AbstractMesh | undefined>;
-        const zoneMeshes = Object.fromEntries(
-            (["zone", "tracked", "cue"] as const).map((role) => [role, ctx?.meshes.find((mesh) => String(mesh.uniqueId) === this.state.zoneMeshIds[role])])
-        ) as unknown as IKhrTriggerZoneNodes<AbstractMesh | undefined>;
+        const zoneCandidates = ctx ? [...ctx.transformNodes, ...ctx.meshes] : [];
+        const zoneNodes = Object.fromEntries(
+            (["zone", "tracked", "cue"] as const).map((role) => [role, zoneCandidates.find((node) => String(node.uniqueId) === this.state.zoneMeshIds[role])])
+        ) as unknown as IKhrTriggerZoneNodes<TransformNode | undefined>;
         const isProcedure = this.state.behaviorKind === "procedure";
         const isZone = this.state.behaviorKind === "zone";
         if (
             !ctx ||
-            (isProcedure ? Object.values(procedureMeshes).some((mesh) => !mesh) : isZone ? Object.values(zoneMeshes).some((mesh) => !mesh) : !trigger || !reveal) ||
+            (isProcedure ? Object.values(procedureMeshes).some((mesh) => !mesh) : isZone ? Object.values(zoneNodes).some((node) => !node) : !trigger || !reveal) ||
             !this._canCreateKhrBehavior() ||
             this.state.isLoading
         ) {
@@ -1223,7 +1232,11 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
             if (isProcedure) {
                 ValidateKhrTwoStepProcedureMeshes(procedureMeshes as IKhrTwoStepProcedureNodes<AbstractMesh>);
             } else if (isZone) {
-                ValidateKhrTriggerZoneMeshes(zoneMeshes as IKhrTriggerZoneNodes<AbstractMesh>, Number(this.state.zoneRadius));
+                ValidateKhrTriggerZoneNodes(
+                    zoneNodes as IKhrTriggerZoneNodes<TransformNode>,
+                    Number(this.state.zoneRadius),
+                    !(this.props.globalState.sceneSource === "file" && this.props.globalState.sourceGlb)
+                );
             }
             const sourceGlb = this.props.globalState.sourceGlb;
             if (this.props.globalState.sceneSource === "file" && sourceGlb) {
@@ -1239,10 +1252,10 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
                     authoredBytes = PatchKhrTwoStepProcedureGlb(sourceBytes, indices as IKhrTwoStepProcedureNodes<number>);
                 } else if (isZone) {
                     const indices = Object.fromEntries(
-                        (["zone", "tracked", "cue"] as const).map((role) => [role, GetGlbNodeIndex(zoneMeshes[role]!, sourceGlb.nodeCount)])
+                        (["zone", "tracked", "cue"] as const).map((role) => [role, GetGlbNodeIndex(zoneNodes[role]!, sourceGlb.nodeCount)])
                     ) as unknown as IKhrTriggerZoneNodes<number | undefined>;
                     if (Object.values(indices).some((index) => index === undefined)) {
-                        throw new Error("All trigger-zone meshes must resolve to nodes in the source GLB.");
+                        throw new Error("All trigger-zone nodes must resolve to nodes in the source GLB.");
                     }
                     authoredBytes = PatchKhrTriggerZoneGlb(sourceBytes, indices as IKhrTriggerZoneNodes<number>, Number(this.state.zoneRadius));
                 } else {
@@ -1276,7 +1289,7 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
             const khrInteractivity = isProcedure
                 ? CreateKhrTwoStepProcedureTemplate(procedureMeshes as IKhrTwoStepProcedureNodes<AbstractMesh>)
                 : isZone
-                  ? CreateKhrTriggerZoneTemplate(zoneMeshes as IKhrTriggerZoneNodes<AbstractMesh>, Number(this.state.zoneRadius))
+                  ? CreateKhrTriggerZoneTemplate(zoneNodes as IKhrTriggerZoneNodes<TransformNode>, Number(this.state.zoneRadius))
                   : CreateKhrSelectionRevealTemplate(trigger!, reveal!);
             const fileStem = isProcedure ? "twoStepProcedure" : isZone ? "triggerZone" : "selectionReveal";
             const data = await serializer.GLBAsync(ctx.scene, fileStem, { khrInteractivity });
@@ -1331,22 +1344,45 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
         const procedureMeshes = Object.fromEntries(
             procedureRoles.map(({ role }) => [role, meshes.find((mesh) => String(mesh.uniqueId) === this.state.procedureMeshIds[role])])
         ) as unknown as IKhrTwoStepProcedureNodes<AbstractMesh | undefined>;
+        const seenZoneIndices = new Set<number>();
+        const zoneCandidates =
+            ctx?.transformNodes.concat(ctx.meshes).filter((node) => {
+                if (node.isDisposed()) {
+                    return false;
+                }
+                if (this.props.globalState.sceneSource !== "file" || !sourceGlb) {
+                    return true;
+                }
+                const index = GetGlbNodeIndex(node, sourceGlb.nodeCount);
+                if (index === undefined || seenZoneIndices.has(index)) {
+                    return false;
+                }
+                seenZoneIndices.add(index);
+                return true;
+            }) ?? [];
         const zoneRoles = [
             { role: "zone", label: "Zone center" },
             { role: "tracked", label: "Tracked point" },
             { role: "cue", label: "Inside-zone cue" },
         ] as const;
-        const zoneMeshes = Object.fromEntries(
-            zoneRoles.map(({ role }) => [role, meshes.find((mesh) => String(mesh.uniqueId) === this.state.zoneMeshIds[role])])
-        ) as unknown as IKhrTriggerZoneNodes<AbstractMesh | undefined>;
+        const zoneNodes = Object.fromEntries(
+            zoneRoles.map(({ role }) => [role, zoneCandidates.find((node) => String(node.uniqueId) === this.state.zoneMeshIds[role])])
+        ) as unknown as IKhrTriggerZoneNodes<TransformNode | undefined>;
         let zoneSelectionValid = false;
-        if (Object.values(zoneMeshes).every((mesh) => !!mesh) && this.state.zoneRadius.trim() !== "") {
+        if (Object.values(zoneNodes).every((node) => !!node) && this.state.zoneRadius.trim() !== "") {
             try {
-                ValidateKhrTriggerZoneMeshes(zoneMeshes as IKhrTriggerZoneNodes<AbstractMesh>, Number(this.state.zoneRadius));
+                ValidateKhrTriggerZoneNodes(
+                    zoneNodes as IKhrTriggerZoneNodes<TransformNode>,
+                    Number(this.state.zoneRadius),
+                    !(sourceGlb && this.props.globalState.sceneSource === "file")
+                );
                 zoneSelectionValid = true;
                 if (sourceGlb && this.props.globalState.sceneSource === "file") {
-                    const indices = Object.values(zoneMeshes).map((mesh) => GetGlbNodeIndex(mesh!, sourceGlb.nodeCount));
-                    zoneSelectionValid = indices.every((index) => index !== undefined) && new Set(indices).size === indices.length;
+                    const indices = Object.values(zoneNodes).map((node) => GetGlbNodeIndex(node!, sourceGlb.nodeCount));
+                    zoneSelectionValid =
+                        indices.every((index) => index !== undefined) &&
+                        new Set(indices).size === indices.length &&
+                        sourceGlb.nodeParents[indices[0]!] === sourceGlb.nodeParents[indices[1]!];
                 }
             } catch {
                 // Keep Create disabled until the roles share a coordinate space.
@@ -1369,6 +1405,10 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
             sourceGlb && this.props.globalState.sceneSource === "file"
                 ? `${mesh.name || "Mesh"} (glTF node ${GetGlbNodeIndex(mesh, sourceGlb.nodeCount)})`
                 : `${mesh.name || "Mesh"} (#${mesh.uniqueId})`;
+        const zoneLabel = (node: TransformNode) =>
+            sourceGlb && this.props.globalState.sceneSource === "file"
+                ? `${node.name || "Node"} (glTF node ${GetGlbNodeIndex(node, sourceGlb.nodeCount)})`
+                : `${node.name || "Node"} (#${node.uniqueId})`;
         const sourceHasAnimations = this.props.globalState.sceneSource === "file" && !!sourceGlb?.hasAnimations;
         const canOpenAuthoring = this._canCreateKhrBehavior();
         const canCreate = canOpenAuthoring && !sourceHasAnimations;
@@ -1473,7 +1513,7 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
                                     {this.state.behaviorKind === "procedure"
                                         ? "Select the first part, then the second. The cues appear as you progress; selecting Reset starts over."
                                         : this.state.behaviorKind === "zone"
-                                          ? "Show the cue while the tracked point is inside a sphere around the zone center. Both nodes must share a parent; radius uses that parent's units."
+                                          ? "Show the cue while the tracked point is inside a sphere around the zone center. The center and tracked point must share a parent; radius uses that parent's units."
                                           : "Selecting the trigger will reveal the second mesh."}
                                 </Body1>
                                 {sourceHasAnimations && (
@@ -1487,7 +1527,7 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
                                 {this.state.behaviorKind === "zone" ? (
                                     <>
                                         {zoneRoles.map(({ role, label }) => {
-                                            const selected = zoneMeshes[role];
+                                            const selected = zoneNodes[role];
                                             return (
                                                 <React.Fragment key={role}>
                                                     <Label htmlFor={`khr-zone-${role}`}>{label}</Label>
@@ -1496,13 +1536,13 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
                                                         aria-label={label}
                                                         className={classes.authoringSelect}
                                                         placeholder={`Select ${label.toLowerCase()}`}
-                                                        value={selected ? meshLabel(selected) : ""}
+                                                        value={selected ? zoneLabel(selected) : ""}
                                                         selectedOptions={selected ? [String(selected.uniqueId)] : []}
                                                         onOptionSelect={(_, data) => this.setState({ zoneMeshIds: { ...this.state.zoneMeshIds, [role]: data.optionValue ?? "" } })}
                                                     >
-                                                        {meshes.map((mesh) => (
-                                                            <Option key={mesh.uniqueId} value={String(mesh.uniqueId)} text={meshLabel(mesh)}>
-                                                                {meshLabel(mesh)}
+                                                        {zoneCandidates.map((node) => (
+                                                            <Option key={node.uniqueId} value={String(node.uniqueId)} text={zoneLabel(node)}>
+                                                                {zoneLabel(node)}
                                                             </Option>
                                                         ))}
                                                     </Dropdown>
