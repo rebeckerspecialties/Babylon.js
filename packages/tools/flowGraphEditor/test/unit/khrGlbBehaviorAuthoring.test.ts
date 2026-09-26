@@ -2,7 +2,15 @@ import { NullEngine } from "core/Engines/nullEngine";
 import { CreateBox } from "core/Meshes/Builders/boxBuilder";
 import { TransformNode } from "core/Meshes/transformNode";
 import { Scene } from "core/scene";
-import { GetGlbNodeIndex, PatchKhrSelectionRevealGlb, PatchKhrTwoStepProcedureGlb, ReadGlbDocument, type IGlbDocument } from "flow-graph-editor/khrGlbBehaviorAuthoring";
+import {
+    GetGlbNodeIndex,
+    GetGlbNodeParents,
+    PatchKhrSelectionRevealGlb,
+    PatchKhrTriggerZoneGlb,
+    PatchKhrTwoStepProcedureGlb,
+    ReadGlbDocument,
+    type IGlbDocument,
+} from "flow-graph-editor/khrGlbBehaviorAuthoring";
 import { CreateKHRInteractivityDocument } from "loaders/glTF/2.0/Extensions/KHR_interactivity/pure";
 import { describe, expect, it } from "vitest";
 
@@ -74,6 +82,54 @@ function RichSourceDocument(): RichDocument {
 }
 
 describe("lossless GLB selection behavior authoring", () => {
+    it("resolves source-node parents independently of primitive wrappers", () => {
+        const document = RichSourceDocument();
+        expect(GetGlbNodeParents(document)).toEqual([undefined, 0, 0]);
+        document.nodes[2].children = [1];
+        expect(() => GetGlbNodeParents(document)).toThrow("malformed node hierarchy");
+    });
+
+    it("patches a spherical zone without changing source hierarchy, metadata, or chunks", () => {
+        const document = RichSourceDocument();
+        document.nodes[0].children = [1, 2, 3];
+        document.nodes.push({ name: "inside cue", mesh: 0, extras: { stableId: "cue-1" } });
+        const source = BuildGlb(document, [{ type: BinChunk, data: new Uint8Array([1, 2, 3, 4]) }]);
+        const result = PatchKhrTriggerZoneGlb(source, { zone: 1, tracked: 2, cue: 3 }, 2.5);
+        const authored = ReadGlbDocument(result);
+        const model = CreateKHRInteractivityDocument(authored.extensions!.KHR_interactivity as any, new Set(authored.extensionsUsed), authored.nodes!.length);
+        expect(model.diagnostics).toEqual([]);
+        expect(model.graphs[0].diagnostics).toEqual([]);
+        expect(SuffixAfterJson(result)).toEqual(SuffixAfterJson(source));
+        expect(authored.nodes!.map((node) => ({ name: node.name, extras: node.extras, children: node.children }))).toEqual(
+            document.nodes.map((node) => ({ name: node.name, extras: node.extras, children: node.children }))
+        );
+        expect(authored.nodes![3].extensions!.KHR_node_visibility).toEqual({ visible: false });
+        expect(authored.extensions!.EXT_vendor_meta).toEqual(document.extensions.EXT_vendor_meta);
+    });
+
+    it("rejects ambiguous or inert source zones", () => {
+        const document = RichSourceDocument();
+        document.nodes[0].children = [1, 2, 3];
+        document.nodes.push({ name: "inside cue", mesh: 0 });
+        const indices = { zone: 1, tracked: 2, cue: 3 };
+        expect(() => PatchKhrTriggerZoneGlb(BuildGlb(document), { ...indices, cue: 1 }, 1)).toThrow("different glTF nodes");
+        expect(() => PatchKhrTriggerZoneGlb(BuildGlb(document), indices, 0)).toThrow("positive finite");
+        document.nodes[0].children = [1, 3];
+        expect(() => PatchKhrTriggerZoneGlb(BuildGlb(document), indices, 1)).toThrow("same parent");
+        document.nodes[0].children = [1, 2, 3];
+        document.nodes[1].matrix = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+        expect(() => PatchKhrTriggerZoneGlb(BuildGlb(document), indices, 1)).toThrow("translation properties");
+        delete document.nodes[1].matrix;
+        document.nodes[0].extensions = { KHR_node_visibility: { visible: false } };
+        expect(() => PatchKhrTriggerZoneGlb(BuildGlb(document), indices, 1)).toThrow("cue ancestor disables visibility");
+        delete document.nodes[0].extensions;
+        document.animations = [{ name: "inspection", samplers: [], channels: [] }];
+        expect(() => PatchKhrTriggerZoneGlb(BuildGlb(document), indices, 1)).toThrow("animations from playing automatically");
+        delete document.animations;
+        document.extensions.KHR_interactivity = { graphs: [] };
+        expect(() => PatchKhrTriggerZoneGlb(BuildGlb(document), indices, 1)).toThrow("already has a behavior graph");
+    });
+
     const procedure = { first: 1, second: 2, nextCue: 3, completionCue: 4, reset: 5 };
     const ProcedureDocument = () => {
         const document = RichSourceDocument();
