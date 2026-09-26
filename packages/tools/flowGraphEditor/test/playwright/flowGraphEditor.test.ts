@@ -2494,7 +2494,8 @@ test.describe("Flow Graph Editor — Graph Tabs Preview Files and glTF Import", 
     });
 
     test("rejects a reveal target beneath a hidden source ancestor without downloading or changing the scene", async ({ page }, testInfo) => {
-        const { bytes } = BuildExistingGlbFixture(false, false, false, false, false, false, true);
+        const { bytes, document } = BuildExistingGlbFixture(false, false, false, false, false, false, false, false, true);
+        expect(document.nodes[3].extensions.KHR_node_visibility.visible).toBe(false);
         const fge = new FlowGraphEditorPage(page);
         await fge.goto({ local: true });
         await fge.assertEditorReady();
