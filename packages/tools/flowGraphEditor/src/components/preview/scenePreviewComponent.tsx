@@ -1513,7 +1513,7 @@ class ScenePreviewInner extends React.Component<IScenePreviewComponentInnerProps
                                     {this.state.behaviorKind === "procedure"
                                         ? "Select the first part, then the second. The cues appear as you progress; selecting Reset starts over."
                                         : this.state.behaviorKind === "zone"
-                                          ? "Show the cue while the tracked point is inside a sphere around the zone center. The center and tracked point must share a parent; radius uses that parent's units."
+                                          ? "Show the cue while the tracked point is inside a sphere around the zone center. The XR host must move the tracked node; choosing it does not bind hand or headset tracking. Both nodes must share a parent, whose units set the radius."
                                           : "Selecting the trigger will reveal the second mesh."}
                                 </Body1>
                                 {sourceHasAnimations && (

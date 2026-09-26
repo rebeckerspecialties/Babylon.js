@@ -2644,6 +2644,40 @@ test.describe("Flow Graph Editor — Graph Tabs Preview Files and glTF Import", 
         await expect.poll(cueVisible).toBe(true);
     });
 
+    test("blocks trigger-zone authoring on an animated source GLB before creation", async ({ page }) => {
+        const { bytes } = BuildExistingGlbFixture(false, false, true, true);
+        const fge = new FlowGraphEditorPage(page);
+        await fge.goto({ local: true });
+        await fge.assertEditorReady();
+        await page.evaluate(
+            (data) => {
+                const file = new File([new Uint8Array(data)], "animated-zone.glb", { type: "model/gltf-binary" });
+                const transfer = new DataTransfer();
+                transfer.items.add(file);
+                (document.querySelector("canvas") ?? document.body).dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+            },
+            [...bytes]
+        );
+        await expect.poll(async () => (await GetSceneContextSnapshot(page))?.source).toBe("file");
+        const originalScene = await GetSceneContextSnapshot(page);
+        await page.getByRole("button", { name: "New behavior" }).click();
+        await page.getByRole("combobox", { name: "Behavior type" }).click();
+        await page.getByRole("option", { name: "Sphere trigger zone" }).click();
+        await expect(page.getByText(/This GLB has animations.*explicit animation behavior/i)).toBeVisible();
+        for (const [label, index] of [
+            ["Zone center", 1],
+            ["Tracked point", 2],
+            ["Inside-zone cue", 3],
+        ] as const) {
+            await page.getByRole("combobox", { name: label }).click();
+            await page.getByRole("option", { name: new RegExp(`glTF node ${index}\\)`) }).click();
+        }
+        await page.getByRole("spinbutton", { name: "Radius" }).fill("1");
+        await expect(page.getByRole("button", { name: "Create behavior" })).toBeDisabled();
+        expect(await GetSceneContextSnapshot(page)).toEqual(originalScene);
+        expect(await fge.getGraphNames()).toEqual(["Graph 1"]);
+    });
+
     test("offers transform-only GLB nodes as zone and tracked points", async ({ page }) => {
         test.setTimeout(90_000);
         const { bytes } = BuildExistingGlbFixture(false, false, false, true, true);
