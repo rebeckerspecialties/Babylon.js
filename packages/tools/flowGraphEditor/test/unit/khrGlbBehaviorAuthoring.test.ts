@@ -2,7 +2,7 @@ import { NullEngine } from "core/Engines/nullEngine";
 import { CreateBox } from "core/Meshes/Builders/boxBuilder";
 import { TransformNode } from "core/Meshes/transformNode";
 import { Scene } from "core/scene";
-import { GetGlbNodeIndex, PatchKhrSelectionRevealGlb, ReadGlbDocument, type IGlbDocument } from "flow-graph-editor/khrGlbBehaviorAuthoring";
+import { GetGlbNodeIndex, PatchKhrSelectionRevealGlb, PatchKhrTwoStepProcedureGlb, ReadGlbDocument, type IGlbDocument } from "flow-graph-editor/khrGlbBehaviorAuthoring";
 import { CreateKHRInteractivityDocument } from "loaders/glTF/2.0/Extensions/KHR_interactivity/pure";
 import { describe, expect, it } from "vitest";
 
@@ -74,6 +74,67 @@ function RichSourceDocument(): RichDocument {
 }
 
 describe("lossless GLB selection behavior authoring", () => {
+    const procedure = { first: 1, second: 2, nextCue: 3, completionCue: 4, reset: 5 };
+    const ProcedureDocument = () => {
+        const document = RichSourceDocument();
+        document.nodes[0].children = [1, 2, 3, 4, 5];
+        document.nodes.push(
+            { name: "next step cue", mesh: 0, extras: { stableId: "cue-1" } },
+            { name: "completed cue", mesh: 0, extras: { stableId: "cue-2" } },
+            { name: "reset", mesh: 0, extras: { stableId: "reset-1" } }
+        );
+        return document;
+    };
+
+    it("patches only procedure fields in an existing GLB and keeps its chunks and identities", () => {
+        const document = ProcedureDocument();
+        const source = BuildGlb(document, [{ type: BinChunk, data: new Uint8Array([1, 2, 3, 4]) }]);
+        const result = PatchKhrTwoStepProcedureGlb(source, procedure);
+        const authored = ReadGlbDocument(result);
+        const graph = authored.extensions!.KHR_interactivity as any;
+        const model = CreateKHRInteractivityDocument(graph, new Set(authored.extensionsUsed), authored.nodes!.length);
+
+        expect(model.diagnostics).toEqual([]);
+        expect(model.graphs[0].diagnostics).toEqual([]);
+        expect(model.graphs[0].valid).toBe(true);
+        expect(SuffixAfterJson(result)).toEqual(SuffixAfterJson(source));
+        expect(authored.nodes!.map((node) => ({ name: node.name, extras: node.extras, children: node.children }))).toEqual(
+            document.nodes.map((node) => ({ name: node.name, extras: node.extras, children: node.children }))
+        );
+        for (const index of [1, 2, 5]) {
+            expect(authored.nodes![index].extensions!.KHR_node_selectability).toEqual({ selectable: true });
+        }
+        for (const index of [3, 4]) {
+            expect(authored.nodes![index].extensions!.KHR_node_visibility).toEqual({ visible: false });
+        }
+        expect(authored.extensions!.EXT_vendor_meta).toEqual(document.extensions.EXT_vendor_meta);
+    });
+
+    it("rejects overlapping procedure roles, hidden controls, animated sources, and existing graphs", () => {
+        const document = ProcedureDocument();
+        const source = BuildGlb(document);
+        expect(() => PatchKhrTwoStepProcedureGlb(source, { ...procedure, second: 1 })).toThrow("different glTF nodes");
+        document.nodes[3].children = [5];
+        expect(() => PatchKhrTwoStepProcedureGlb(BuildGlb(document), procedure)).toThrow("ancestor");
+        delete document.nodes[3].children;
+        document.nodes[0].extensions = { KHR_node_selectability: { selectable: false } };
+        expect(() => PatchKhrTwoStepProcedureGlb(BuildGlb(document), procedure)).toThrow("selectability");
+        delete document.nodes[0].extensions;
+        document.animations = [{ name: "inspection", samplers: [], channels: [] }];
+        expect(() => PatchKhrTwoStepProcedureGlb(BuildGlb(document), procedure)).toThrow("animations from playing automatically");
+        delete document.animations;
+        document.extensions.KHR_interactivity = { graphs: [] };
+        expect(() => PatchKhrTwoStepProcedureGlb(BuildGlb(document), procedure)).toThrow("already has a behavior graph");
+    });
+
+    it("rejects a cue beneath a hidden ancestor instead of exporting a cue that cannot appear", () => {
+        const document = ProcedureDocument();
+        document.nodes[0].children = [1, 2, 4, 5, 6];
+        document.nodes.push({ name: "hidden cue parent", children: [3], extensions: { KHR_node_visibility: { visible: false } } });
+
+        expect(() => PatchKhrTwoStepProcedureGlb(BuildGlb(document), procedure)).toThrow("cue ancestor disables visibility");
+    });
+
     it("rejects animated assets because a behavior graph would take control of their animations", () => {
         const document = RichSourceDocument();
         document.animations = [{ name: "inspection", samplers: [], channels: [] }];
