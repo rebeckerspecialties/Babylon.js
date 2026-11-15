@@ -308,6 +308,7 @@ export class MaterialPluginManager {
                                     const arraySize = uniform.arraySize ?? 0;
                                     eventData.ubo.addUniform(uniform.name, uniform.size, arraySize);
                                     if (isWebGPU) {
+                                        const declaration = eventData.ubo.useUbo ? "uniform<Material>" : "uniform";
                                         let type: string;
                                         switch (uniform.type) {
                                             case "mat4":
@@ -322,9 +323,9 @@ export class MaterialPluginManager {
                                         }
 
                                         if (arraySize > 0) {
-                                            uboDeclaration.push(`uniform ${uniform.name}: array<${type}, ${arraySize}>;\n`);
+                                            uboDeclaration.push(`${declaration} ${uniform.name}: array<${type}, ${arraySize}>;\n`);
                                         } else {
-                                            uboDeclaration.push(`uniform ${uniform.name}: ${type};\n`);
+                                            uboDeclaration.push(`${declaration} ${uniform.name}: ${type};\n`);
                                         }
                                     } else {
                                         uboDeclaration.push(`${uniform.type} ${uniform.name}${arraySize > 0 ? `[${arraySize}]` : ""};\n`);
