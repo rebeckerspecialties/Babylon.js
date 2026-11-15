@@ -1,5 +1,6 @@
 import ts from "typescript";
 import { dirname, resolve } from "node:path";
+import { accessorInlineTransformersFromEnv } from "./accessorInlineTransformer.mjs";
 
 /**
  * Share TypeScript emit across the sequential entries of one production Rollup invocation.
@@ -49,7 +50,7 @@ export function createTypeScriptEmitPlugins(tsconfig) {
                 );
             }
             const emitted = new Map();
-            const result = program.emit(undefined, (fileName, text, _bom, _error, sourceFiles) => {
+            const emitFile = (fileName, text, _bom, _error, sourceFiles) => {
                 if (sourceFiles?.length !== 1) {
                     return;
                 }
@@ -64,7 +65,9 @@ export function createTypeScriptEmitPlugins(tsconfig) {
                     output.code = text.replace(/\n?\/\/# sourceMappingURL=.*(?:\r?\n)?$/, "\n");
                 }
                 emitted.set(id, output);
-            });
+            };
+            // PROTOTYPE: type-directed accessor inlining, switched by BABYLON_ACCESSOR_INLINE.
+            const result = program.emit(undefined, emitFile, undefined, undefined, accessorInlineTransformersFromEnv(program));
             if (result.emitSkipped) {
                 this.error("TypeScript did not emit the production bundle inputs");
             }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,6 +22,26 @@ function collectEntryFiles(dir: string): string[] {
 }
 
 describe("UMD Rollup compatibility", () => {
+    it.each(["1", "2", "3", "10"])("accepts %s explicitly requested compression passes", async (passes) => {
+        const { commonUMDRollupConfiguration } = await import("../../../rollupUMDHelper.mjs");
+        vi.stubEnv("BABYLON_MINIFY_PASSES", passes);
+        try {
+            expect(() => commonUMDRollupConfiguration({ devPackageName: "core", mode: "production" })).not.toThrow();
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
+    it.each(["0", "-1", "11", "1.5", "invalid", ""])("rejects invalid compression pass count %s", async (passes) => {
+        const { commonUMDRollupConfiguration } = await import("../../../rollupUMDHelper.mjs");
+        vi.stubEnv("BABYLON_MINIFY_PASSES", passes);
+        try {
+            expect(() => commonUMDRollupConfiguration({ devPackageName: "core", mode: "production" })).toThrow("BABYLON_MINIFY_PASSES must be an integer from 1 to 10.");
+        } finally {
+            vi.unstubAllEnvs();
+        }
+    });
+
     it("keeps UMD entry points compatible with webpack libraryExport default", () => {
         const entryFiles = collectEntryFiles(umdRoot);
         expect(entryFiles.length).toBeGreaterThan(0);
