@@ -22,6 +22,7 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { transform as esbuildTransform } from "esbuild";
 import { downlevelJavaScriptToEs5 } from "../../scripts/downlevelJavaScriptToEs5.mjs";
 import { createTypeScriptEmitPlugins } from "./rollupTypeScript.mjs";
+import { accessorInlineTransformersFromEnv, getAccessorInlineOptionsFromEnv } from "./accessorInlineTransformer.mjs";
 
 // Repo root — used as the filterRoot for @rollup/plugin-typescript so that
 // `**/*.ts` patterns are matched against repo-relative paths (which never start
@@ -637,8 +638,12 @@ function copyMinToMaxPlugin(outputDir, primaryName, chunkNames) {
  * @returns {import("rollup").Plugin} The terser plugin.
  */
 function createTerserPlugin() {
+    const passes = Number(process.env.BABYLON_MINIFY_PASSES ?? 2);
+    if (!Number.isInteger(passes) || passes < 1 || passes > 10) {
+        throw new Error("BABYLON_MINIFY_PASSES must be an integer from 1 to 10.");
+    }
     return terser({
-        compress: { passes: 2, dead_code: true },
+        compress: { passes, dead_code: true },
         mangle: { reserved: ["_"] },
         format: { comments: false },
     });
@@ -832,6 +837,8 @@ export function commonUMDRollupConfiguration(options) {
                     // any package (including aliased cross-package tool sources).
                     filterRoot: REPO_ROOT,
                     include: ["**/*.ts", "**/*.tsx"],
+                    // PROTOTYPE: type-directed accessor inlining, switched by BABYLON_ACCESSOR_INLINE.
+                    transformers: getAccessorInlineOptionsFromEnv() ? accessorInlineTransformersFromEnv : undefined,
                 }),
                 // Fallback: transpile .ts files that are outside the tsconfig rootDir
                 // (e.g. aliased tool sources) which @rollup/plugin-typescript skips.
@@ -955,6 +962,7 @@ export function commonUMDRollupConfiguration(options) {
                                 inlineSources: true,
                                 filterRoot: REPO_ROOT,
                                 include: ["**/*.ts", "**/*.tsx"],
+                                transformers: getAccessorInlineOptionsFromEnv() ? accessorInlineTransformersFromEnv : undefined,
                             }),
                       transpileExternalTsPlugin(),
                   ];
