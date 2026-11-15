@@ -19,6 +19,8 @@ const builtInName_frag_depth = "fragmentOutputs.fragDepth";
 const leftOverVarName = "uniforms";
 const internalsVarName = "internals";
 
+type UniformDescription = { name: string; type: string; length: number };
+
 const gpuTextureViewDimensionByWebGPUTextureFunction: { [key: string]: Nullable<GPUTextureViewDimension> } = {
     texture_1d: WebGPUConstants.TextureViewDimension.E1d,
     texture_2d: WebGPUConstants.TextureViewDimension.E2d,
@@ -48,9 +50,11 @@ export class WebGPUShaderProcessorWGSL extends WebGPUShaderProcessor {
     protected _varyingsWGSL: string[];
     protected _varyingNamesWGSL: string[];
     protected _stridedUniformArrays: string[];
+    private _namedUniformBuffers: Map<string, UniformDescription[]>;
+    private _uniformBufferByName: Map<string, string>;
 
     public override shaderLanguage = ShaderLanguage.WGSL;
-    public uniformRegexp = /uniform\s+(\w+)\s*:\s*(.+)\s*;/;
+    public uniformRegexp = /uniform(?:\s*<\s*(\w+)\s*>)?\s+(\w+)\s*:\s*(.+)\s*;/;
     public textureRegexp = /var\s+(\w+)\s*:\s*((array<\s*)?(texture_\w+)\s*(<\s*(.+)\s*>)?\s*(,\s*\w+\s*>\s*)?);/;
     public noPrecision = true;
     public pureMode = false;
@@ -88,6 +92,8 @@ export class WebGPUShaderProcessorWGSL extends WebGPUShaderProcessor {
         this._varyingsWGSL = [];
         this._varyingNamesWGSL = [];
         this._stridedUniformArrays = [];
+        this._namedUniformBuffers = new Map();
+        this._uniformBufferByName = new Map();
     }
 
     public preProcessShaderCode(code: string): string {
@@ -167,10 +173,36 @@ export class WebGPUShaderProcessorWGSL extends WebGPUShaderProcessor {
     public uniformProcessor(uniform: string, isFragment: boolean, preProcessors: { [key: string]: string }): string {
         const match = this.uniformRegexp.exec(uniform);
         if (match !== null) {
-            const uniformType = match[2];
-            const name = match[1];
+            const bufferName = match[1] === "Material" && "DISABLE_MATERIAL_UNIFORM_BUFFER" in preProcessors ? undefined : match[1];
+            const name = match[2];
+            const uniformType = match[3];
+            const previousBuffer = this._uniformBufferByName.get(name);
+            const targetBuffer = bufferName || WebGPUShaderProcessor.LeftOvertUBOName;
+            if (previousBuffer !== undefined && previousBuffer !== targetBuffer) {
+                throw new Error(`Uniform ${name} is declared in both ${previousBuffer} and ${targetBuffer}.`);
+            }
+            this._uniformBufferByName.set(name, targetBuffer);
 
-            this._addUniformToLeftOverUBO(name, uniformType, preProcessors);
+            if (bufferName) {
+                if (bufferName === WebGPUShaderProcessor.LeftOvertUBOName || bufferName === WebGPUShaderProcessor.InternalsUBOName) {
+                    throw new Error(`Uniform buffer name ${bufferName} is reserved.`);
+                }
+                let uniforms = this._namedUniformBuffers.get(bufferName);
+                if (!uniforms) {
+                    uniforms = [];
+                    this._namedUniformBuffers.set(bufferName, uniforms);
+                }
+                const [, type, length] = this._getArraySize(name, uniformType, preProcessors);
+                const previous = uniforms.find((uniform) => uniform.name === name);
+                if (previous && (previous.type !== type || previous.length !== length)) {
+                    throw new Error(`Uniform ${name} has inconsistent declarations in ${bufferName}.`);
+                }
+                if (!previous) {
+                    uniforms.push({ name, type, length });
+                }
+            } else {
+                this._addUniformToLeftOverUBO(name, uniformType, preProcessors);
+            }
 
             uniform = "";
         }
@@ -350,6 +382,19 @@ export class WebGPUShaderProcessorWGSL extends WebGPUShaderProcessor {
 
     public finalizeShaders(vertexCode: string, fragmentCode: string): { vertexCode: string; fragmentCode: string } {
         const enabledExtensions: string[] = [];
+
+        // Explicitly owned uniforms keep the existing uniforms.member spelling, including plugin code.
+        // Their layout is shared by both shader stages and matches UniformBuffer.addUniform order.
+        let namedBuffers = "";
+        for (const [name, uniforms] of this._namedUniformBuffers) {
+            namedBuffers += this._generateUniformBufferStruct(name, uniforms) + `var<uniform> _uniforms${name}: ${name};\n`;
+        }
+        const replaceUniform = (match: string, name: string) => {
+            const buffer = this._uniformBufferByName.get(name);
+            return buffer && this._namedUniformBuffers.has(buffer) ? `_uniforms${buffer}.${name}` : match;
+        };
+        vertexCode = namedBuffers + vertexCode.replace(/\buniforms\s*\.\s*(\w+)\b/g, replaceUniform);
+        fragmentCode = namedBuffers + fragmentCode.replace(/\buniforms\s*\.\s*(\w+)\b/g, replaceUniform);
 
         const fragCoordCode =
             fragmentCode.indexOf("fragmentInputs.position") >= 0 && !this.pureMode
@@ -578,9 +623,16 @@ export class WebGPUShaderProcessorWGSL extends WebGPUShaderProcessor {
     }
 
     protected _generateLeftOverUBOCode(name: string, uniformBufferDescription: WebGPUBufferDescription): string {
+        return (
+            this._generateUniformBufferStruct(name, this._webgpuProcessingContext.leftOverUniforms) +
+            `@group(${uniformBufferDescription.binding.groupIndex}) @binding(${uniformBufferDescription.binding.bindingIndex}) var<uniform> ${leftOverVarName} : ${name};\n`
+        );
+    }
+
+    private _generateUniformBufferStruct(name: string, uniforms: UniformDescription[]): string {
         let stridedArrays = "";
         let ubo = `struct ${name} {\n`;
-        for (const leftOverUniform of this._webgpuProcessingContext.leftOverUniforms) {
+        for (const leftOverUniform of uniforms) {
             const type = leftOverUniform.type.replace(/^(.*?)(<.*>)?$/, "$1");
             const size = WebGPUShaderProcessor.UniformSizes[type];
 
@@ -589,7 +641,7 @@ export class WebGPUShaderProcessorWGSL extends WebGPUShaderProcessor {
                     const stridedArrayType = `${name}_${this._stridedUniformArrays.length}_strided_arr`;
                     stridedArrays += `struct ${stridedArrayType} {
                         @size(16)
-                        el: ${type},
+                        el: ${leftOverUniform.type},
                     }`;
                     this._stridedUniformArrays.push(leftOverUniform.name);
 
@@ -603,8 +655,6 @@ export class WebGPUShaderProcessorWGSL extends WebGPUShaderProcessor {
         }
         ubo += "};\n";
         ubo = `${stridedArrays}\n${ubo}`;
-        ubo += `@group(${uniformBufferDescription.binding.groupIndex}) @binding(${uniformBufferDescription.binding.bindingIndex}) var<uniform> ${leftOverVarName} : ${name};\n`;
-
         return ubo;
     }
 
@@ -671,7 +721,11 @@ export class WebGPUShaderProcessorWGSL extends WebGPUShaderProcessor {
 
             let bufferInfo = this._webgpuProcessingContext.availableBuffers[name];
             if (!bufferInfo) {
-                const knownUBO = type === "uniform" ? WebGPUShaderProcessingContext.KnownUBOs[structName] : null;
+                const knownUBO =
+                    type === "uniform"
+                        ? WebGPUShaderProcessingContext.KnownUBOs[structName] ||
+                          (this._namedUniformBuffers.has(structName) ? { binding: { groupIndex: -1, bindingIndex: -1 } } : null)
+                        : null;
 
                 let binding;
                 if (knownUBO) {

@@ -1279,6 +1279,11 @@ export class Material implements IAnimatable, IClipPlanesHolder {
         Material.OnEventObservable.notifyObservers(this, MaterialPluginEvent.Created);
     }
 
+    /** Whether the WGSL shader declares its material uniforms in a shared buffer. */
+    protected get _useMaterialUniformBufferInWGSL(): boolean {
+        return false;
+    }
+
     /** @internal */
     public _createUniformBuffer() {
         const engine = this.getScene().getEngine();
@@ -1286,8 +1291,8 @@ export class Material implements IAnimatable, IClipPlanesHolder {
         this._uniformBuffer?.dispose();
 
         if (engine.isWebGPU && !this._forceGLSL) {
-            // Switch main UBO to non UBO to connect to leftovers UBO in webgpu
-            this._uniformBuffer = new UniformBuffer(engine, undefined, undefined, this.name, true);
+            // Shaders without explicitly owned uniforms still forward their values to the effect's leftover buffer.
+            this._uniformBuffer = new UniformBuffer(engine, undefined, undefined, this.name, !this._useMaterialUniformBufferInWGSL);
             this._shaderLanguage = ShaderLanguage.WGSL;
         } else {
             this._uniformBuffer = new UniformBuffer(this._scene.getEngine(), undefined, undefined, this.name);

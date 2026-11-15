@@ -624,6 +624,7 @@ export class UniformBuffer {
         if (this._trackUBOsInFrame) {
             this._buffers.push([this._buffer, this._engine._features.checkUbosContentBeforeUpload ? this._bufferData.slice() : undefined]);
             this._bufferIndex = this._buffers.length - 1;
+            this._slotGeneration[this._bufferIndex] = this._dataGeneration;
             this._createBufferOnWrite = false;
         }
     }
@@ -708,13 +709,15 @@ export class UniformBuffer {
             return;
         }
 
-        if (!this._dynamic && !this._needSync) {
+        if (!this._dynamic && (!this._needSync || (this._trackUBOsInFrame && this._slotGeneration[this._bufferIndex] === this._dataGeneration))) {
+            this._needSync = false;
             this._createBufferOnWrite = this._trackUBOsInFrame;
             return;
         }
 
         if (this._buffers && this._buffers.length > 1 && this._buffers[this._bufferIndex][1]) {
             if (this._buffersEqual(this._bufferData, this._buffers[this._bufferIndex][1]!)) {
+                this._slotGeneration[this._bufferIndex] = this._dataGeneration;
                 this._needSync = false;
                 this._createBufferOnWrite = this._trackUBOsInFrame;
                 return;
@@ -726,6 +729,10 @@ export class UniformBuffer {
         this._bufferUpdatedLastFrame = true;
 
         this._engine.updateUniformBuffer(this._buffer, this._bufferData);
+
+        if (this._trackUBOsInFrame) {
+            this._slotGeneration[this._bufferIndex] = this._dataGeneration;
+        }
 
         this._needSync = false;
         this._createBufferOnWrite = this._trackUBOsInFrame;

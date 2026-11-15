@@ -670,6 +670,28 @@ describe("Mesh recorded draws", () => {
             expect(material._getRecordedDrawReference(drawWrapper.effect!)).toBeNull();
         });
 
+        it("rejects a shared material buffer changed within the frame", () => {
+            material._uniformBuffer.addUniform("sharedValue", 4);
+            material._uniformBuffer.updateFloat4("sharedValue", 1, 2, 3, 4);
+            material._uniformBuffer.update();
+            keep(drawWrapper);
+            expect(unchanged()).toBe(true);
+            material._uniformBuffer.updateFloat4("sharedValue", 2, 2, 3, 4);
+            material._uniformBuffer.update();
+            expect(unchanged()).toBe(false);
+            keep(other);
+            expect(other._recordedMaterial).toBeNull();
+        });
+
+        it("rejects a replaced shared material buffer even when it is the first version", () => {
+            keep(drawWrapper);
+            material._uniformBuffer = new UniformBuffer(engine);
+            material._uniformBuffer.addUniform("sharedValue", 4);
+            material._uniformBuffer.create();
+            expect(material._uniformBuffer._isFirstBufferBound()).toBe(true);
+            expect(unchanged()).toBe(false);
+        });
+
         it("is not encoded again for a camera whose view moved off the first buffer when the order of two cameras of a pass changes", () => {
             // a camera of the pass: its view is written to the scene's uniform buffer, in a new buffer if another camera used it
             const cameraA = Matrix.Translation(1, 0, 0);
@@ -911,10 +933,13 @@ describe("Mesh recorded draws", () => {
             vi.spyOn(engine, "_canEncodeRecordedDraw").mockReturnValue(true);
             const replay = vi.spyOn(engine, "_replayRecordedDraw").mockReturnValue(true);
             const mark = vi.spyOn(mesh._uniformBuffer, "_markBufferUsed");
+            const markMaterial = vi.spyOn(material._uniformBuffer, "_markBufferUsed");
             mesh.render(subMesh, false);
             expect(replay).toHaveBeenCalledTimes(1);
             expect(mark).toHaveBeenCalledTimes(1);
             expect(mark.mock.invocationCallOrder[0]).toBeGreaterThan(replay.mock.invocationCallOrder[0]);
+            expect(markMaterial).toHaveBeenCalledTimes(1);
+            expect(markMaterial.mock.invocationCallOrder[0]).toBeGreaterThan(replay.mock.invocationCallOrder[0]);
         });
 
         it("renders a mesh with draw observers", () => {

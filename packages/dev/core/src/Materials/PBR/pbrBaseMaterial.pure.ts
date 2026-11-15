@@ -905,6 +905,10 @@ export abstract class PBRBaseMaterial extends PBRBaseMaterialBase {
 
     protected _cacheHasRenderTargetTextures = false;
 
+    protected override get _useMaterialUniformBufferInWGSL(): boolean {
+        return !this.customShaderNameResolve;
+    }
+
     /**
      * Instantiates a new PBRMaterial instance.
      *
@@ -1057,9 +1061,7 @@ export abstract class PBRBaseMaterial extends PBRBaseMaterialBase {
      * @returns - boolean indicating that the submesh is ready or not.
      */
     public override isReadyForSubMesh(mesh: AbstractMesh, subMesh: SubMesh, useInstances?: boolean): boolean {
-        if (!this._uniformBufferLayoutBuilt) {
-            this.buildUniformLayout();
-        }
+        this._ensureUniformBufferLayout();
 
         const drawWrapper = subMesh._drawWrapper;
 
@@ -1553,7 +1555,7 @@ export abstract class PBRBaseMaterial extends PBRBaseMaterialBase {
             shaderName = this.customShaderNameResolve(shaderName, uniforms, uniformBuffers, samplers, defines, attribs, csnrOptions);
         }
 
-        const join = defines.toString();
+        const join = defines.toString() + (this._uniformBuffer.useUbo ? "" : "\n#define DISABLE_MATERIAL_UNIFORM_BUFFER\n");
         const effect = engine.createEffect(
             shaderName,
             <IEffectCreationOptions>{
@@ -1878,9 +1880,7 @@ export abstract class PBRBaseMaterial extends PBRBaseMaterialBase {
             ...options,
         };
 
-        if (!this._uniformBufferLayoutBuilt) {
-            this.buildUniformLayout();
-        }
+        this._ensureUniformBufferLayout();
 
         this._callbackPluginEventGeneric(MaterialPluginEvent.GetDefineNames, this._eventInfo);
         const checkReady = () => {
@@ -1905,10 +1905,24 @@ export abstract class PBRBaseMaterial extends PBRBaseMaterialBase {
         checkReady();
     }
 
+    private _ensureUniformBufferLayout(): void {
+        if (this.getScene().getEngine().isWebGPU && !this._forceGLSL && this._uniformBuffer.useUbo !== this._useMaterialUniformBufferInWGSL) {
+            this._createUniformBuffer();
+            this.markAsDirty(Material.AllDirtyFlag);
+        }
+        if (!this._uniformBufferLayoutBuilt) {
+            this.buildUniformLayout();
+        }
+    }
+
     /**
      * Initializes the uniform buffer layout for the shader.
      */
     public override buildUniformLayout(): void {
+        // A custom shader may still declare loose material uniforms. Preserve its existing update path.
+        if (this.getScene().getEngine().isWebGPU && !this._forceGLSL && this._uniformBuffer.useUbo !== this._useMaterialUniformBufferInWGSL) {
+            this._createUniformBuffer();
+        }
         // Order is important !
         const ubo = this._uniformBuffer;
         ubo.addUniform("vAlbedoInfos", 2);
