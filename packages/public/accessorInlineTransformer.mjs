@@ -77,6 +77,7 @@ export function getAccessorInlineOptionsFromEnv() {
         downcastPolicy: process.env.BABYLON_ACCESSOR_INLINE_DOWNCAST || "site",
         siblingRule: process.env.BABYLON_ACCESSOR_INLINE_SIBLINGS !== "0",
         scanExternalPackages: process.env.BABYLON_ACCESSOR_INLINE_EXTERNAL !== "0",
+        includeStatic: process.env.BABYLON_ACCESSOR_INLINE_STATIC === "1",
     };
 }
 
@@ -178,7 +179,8 @@ function classifyGetterBody(getter) {
             case ts.SyntaxKind.NullKeyword:
                 return true;
             case ts.SyntaxKind.Identifier:
-                return n.text === "undefined";
+                // Free bindings can resolve differently at the call site (including `undefined`).
+                return false;
             case ts.SyntaxKind.PropertyAccessExpression: {
                 if (!ts.isIdentifier(n.name) || n.questionDotToken || n.flags & ts.NodeFlags.OptionalChain) {
                     return false;
@@ -214,7 +216,7 @@ function classifyGetterBody(getter) {
                 return false;
         }
     };
-    if (check(expr) && thisCount > 0) {
+    if (check(expr) && thisCount > 0 && roots.size > 0) {
         return { kind: "expr", expr, thisCount, lazy, roots: [...roots] };
     }
     return undefined;
@@ -316,9 +318,12 @@ function collectRuntimeDefinitions(sourceFile, sink, where) {
         if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && ts.isIdentifier(node.expression.expression)) {
             const owner = node.expression.expression.text;
             const fn = node.expression.name.text;
-            if ((owner === "Object" || owner === "Reflect") && fn === "defineProperty") {
+            if ((owner === "Object" || owner === "Reflect") && (fn === "defineProperty" || (owner === "Reflect" && fn === "deleteProperty"))) {
                 const key = node.arguments[1];
-                if (key && ts.isStringLiteralLike(key)) {
+                if (fn === "deleteProperty") {
+                    if (key && ts.isStringLiteralLike(key)) sink.literal(key.text, where(node), "deleteProperty");
+                    else sink.dynamic(node, where(node), "deletePrototypeProperty");
+                } else if (key && ts.isStringLiteralLike(key)) {
                     sink.literal(key.text, where(node), "defineProperty");
                 } else {
                     sink.dynamic(node, where(node), "defineProperty");
@@ -338,6 +343,17 @@ function collectRuntimeDefinitions(sourceFile, sink, where) {
                     sink.dynamic(node, where(node), "defineProperties");
                 }
             }
+        } else if (ts.isDeleteExpression(node) && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression))) {
+            const access = node.expression;
+            const name = ts.isPropertyAccessExpression(access) ? access.name.text : ts.isStringLiteralLike(access.argumentExpression) ? access.argumentExpression.text : undefined;
+            if (name !== undefined && ts.isPropertyAccessExpression(access.expression) && access.expression.name.text === "prototype")
+                sink.literal(name, where(node), "deletePrototypeProperty");
+            else
+                sink.dynamic(
+                    node,
+                    where(node),
+                    ts.isPropertyAccessExpression(access.expression) && access.expression.name.text === "prototype" ? "deletePrototypeProperty" : "deleteProperty"
+                );
         } else if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) {
             const left = node.left;
             if (
@@ -394,6 +410,13 @@ function analyze(program, options) {
     const programFileSet = new Set(sourceFiles.map((sf) => resolve(sf.fileName)));
 
     const classes = [];
+    const writtenBindings = new Set();
+    function recordBindingWrites(node) {
+        if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) return;
+        if (ts.isIdentifier(node)) writtenBindings.add(checker.getSymbolAtLocation(node));
+        if (ts.isShorthandPropertyAssignment(node)) writtenBindings.add(checker.getShorthandAssignmentValueSymbol(node));
+        ts.forEachChild(node, recordBindingWrites);
+    }
     const assertions = [];
     const redefinedNames = new Map(); // name -> [{where, how}]
     const dynamicRedefinitions = [];
@@ -411,6 +434,12 @@ function analyze(program, options) {
     };
     for (const sf of sourceFiles) {
         const visit = (node) => {
+            if (ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) recordBindingWrites(node.left);
+            if (ts.isForInStatement(node) || ts.isForOfStatement(node)) {
+                if (!ts.isVariableDeclarationList(node.initializer)) recordBindingWrites(node.initializer);
+            }
+            if ((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) && [ts.SyntaxKind.PlusPlusToken, ts.SyntaxKind.MinusMinusToken].includes(node.operator))
+                recordBindingWrites(node.operand);
             if (ts.isClassLike(node)) {
                 classes.push(node);
             } else if (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node)) {
@@ -454,9 +483,10 @@ function analyze(program, options) {
             stats.gettersTotal++;
             const form = classifyGetterBody(member);
             stats.gettersByForm[form ? form.kind : "other"]++;
-            if (ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static) {
+            const isStatic = !!(ts.getCombinedModifierFlags(member) & ts.ModifierFlags.Static);
+            if (isStatic) {
                 stats.gettersStatic++;
-                continue;
+                if (!options.includeStatic) continue;
             }
             if (!form || !ts.isIdentifier(member.name)) {
                 continue;
@@ -473,6 +503,7 @@ function analyze(program, options) {
                 cls,
                 getter: member,
                 setter: undefined,
+                isStatic,
                 form,
                 where: where(member),
                 excluded: [],
@@ -492,6 +523,8 @@ function analyze(program, options) {
             if (!symbol) {
                 candidate.excluded.push({ reason: "noSymbol" });
             }
+            if (isStatic && hasDecorators(cls)) candidate.excluded.push({ reason: "classDecorator" });
+            if (isStatic && writtenBindings.has(classSymbol(cls))) candidate.excluded.push({ reason: "classBindingAssigned" });
             if (hasDecorators(member) || (candidate.setter && hasDecorators(candidate.setter))) {
                 const names = [...(ts.getDecorators(member) ?? []), ...((candidate.setter && ts.getDecorators(candidate.setter)) || [])].map((d) => {
                     const expression = ts.isCallExpression(d.expression) ? d.expression.expression : d.expression;
@@ -585,7 +618,11 @@ function analyze(program, options) {
     }
     const dynamicReport = [];
     for (const dynamic of dynamicRedefinitions) {
-        const target = ts.isCallExpression(dynamic.node) ? dynamic.node.arguments[0] : dynamic.node.left.expression;
+        const target = ts.isCallExpression(dynamic.node)
+            ? dynamic.node.arguments[0]
+            : ts.isDeleteExpression(dynamic.node)
+              ? dynamic.node.expression.expression
+              : dynamic.node.left.expression;
         let typeText = "?";
         let hits = 0;
         if (target) {
@@ -593,6 +630,7 @@ function analyze(program, options) {
             typeText = checker.typeToString(type);
             if (!(type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown))) {
                 for (const candidate of candidates) {
+                    if (dynamic.how === "deleteProperty" && !candidate.isStatic) continue;
                     const property = checker.getPropertyOfType(type, candidate.prop);
                     if (property?.declarations?.includes(candidate.getter)) {
                         candidate.excluded.push({ reason: "dynamicDefineProperty", by: dynamic.where });
@@ -1165,6 +1203,14 @@ export function createAccessorInlineTransformers(program, options) {
                 return no(`receiverIsAssertion:${assertedAs}`, node);
             }
         }
+        if (candidate.isStatic) {
+            if (!ts.isIdentifier(node.expression) && !ts.isPropertyAccessExpression(node.expression)) return no("static:nonDeclaringClassReceiver", node);
+            let receiver = checker.getSymbolAtLocation(node.expression);
+            if (receiver?.flags & ts.SymbolFlags.Alias) receiver = checker.getAliasedSymbol(receiver);
+            // Only the declaring class itself, never a constructor variable or polymorphic `this`.
+            if (receiver !== analysis.classSymbol(candidate.cls)) return no("static:nonDeclaringClassReceiver", node);
+            return { candidate, kind: "staticClass" };
+        }
         const kind = receiverKind(checker.getTypeAtLocation(node.expression), candidate);
         if (!ALLOWED.has(kind) || (kind === "mapped" && !options.allowMapped)) {
             return no(`receiver:${kind}`, node);
@@ -1268,26 +1314,6 @@ export function createAccessorInlineTransformers(program, options) {
             }
         };
 
-        /** Receivers that can be evaluated several times: `this`, or a local variable/parameter. */
-        const simpleReceiverFactory = (receiver) => {
-            const inner = stripTypeOnly(receiver).node;
-            if (inner.kind === ts.SyntaxKind.ThisKeyword) {
-                return () => f.createThis();
-            }
-            if (ts.isIdentifier(inner)) {
-                const symbol = checker.getSymbolAtLocation(inner);
-                const declaration = symbol?.valueDeclaration;
-                if (
-                    declaration &&
-                    (ts.isVariableDeclaration(declaration) || ts.isParameter(declaration) || ts.isBindingElement(declaration)) &&
-                    declaration.getSourceFile() === inner.getSourceFile()
-                ) {
-                    return () => ts.setOriginalNode(f.createIdentifier(inner.text), inner);
-                }
-            }
-            return undefined;
-        };
-
         return (sourceFile) => {
             if (sourceFile.isDeclarationFile) {
                 return sourceFile;
@@ -1306,16 +1332,15 @@ export function createAccessorInlineTransformers(program, options) {
                             let replacement;
                             if (form === "expr") {
                                 const chain = !!(node.flags & ts.NodeFlags.OptionalChain);
-                                const simple = simpleReceiverFactory(node.expression);
                                 if (chain) {
                                     skip("expr:optionalChainSite");
-                                } else if (simple) {
-                                    replacement = ts.setTextRange(f.createParenthesizedExpression(cloneExpression(candidate.form.expr, simple)), node);
                                 } else if (candidate.form.thisCount === 1 && !candidate.form.lazy) {
                                     const receiver = ts.visitNode(node.expression, visitor);
                                     replacement = ts.setTextRange(f.createParenthesizedExpression(cloneExpression(candidate.form.expr, () => receiver)), node);
                                 } else {
-                                    skip("expr:complexReceiver");
+                                    // A local receiver can be reassigned by a getter/coercion during evaluation.
+                                    // Lazy expressions can also omit the original mandatory receiver lookup.
+                                    skip("expr:repeatedOrLazyReceiver");
                                 }
                             } else {
                                 const names = expandPath(candidate);
@@ -1385,6 +1410,7 @@ export function createAccessorInlineTransformers(program, options) {
         return {
             mode: options.mode,
             enabledForms: MODES[options.mode],
+            includeStatic: !!options.includeStatic,
             allowMapped: options.allowMapped,
             total,
             filesTouched,
