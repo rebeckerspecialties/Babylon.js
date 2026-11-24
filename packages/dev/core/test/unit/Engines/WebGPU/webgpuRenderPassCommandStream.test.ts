@@ -890,6 +890,72 @@ describe("WebGPURenderPassCommandStream", () => {
         }
     });
 
+    it.each([0, 1, 2, 43, 256, 4096])("preserves mixed command words when growing from %s words", (capacity) => {
+        const control = createRecordingRenderPass();
+        const candidate = createRecordingRenderPass();
+        const streams = [createStream(), createStream()];
+        (streams[1] as unknown as { _commandWords: Uint32Array })._commandWords = new Uint32Array(capacity);
+
+        for (const bindingCount of [0, 1, 7]) {
+            for (const [index, pass] of [control, candidate].entries()) {
+                for (let draw = 0; draw < 24; draw++) {
+                    const common = {
+                        renderPass: pass.renderPass,
+                        pipeline: createResource<GPURenderPipeline>(2 ** 32 + 100 + Math.floor(draw / 6)),
+                        bindGroups: Array.from({ length: bindingCount }, (_, slot) => createResource<GPUBindGroup>(2 ** 40 + 201 + slot + (draw % 3))),
+                        vertexBuffers: Array.from({ length: bindingCount }, (_, slot) => createVertexBuffer(2 ** 45 + 301 + slot, 2 ** 33 + draw * 16, false)),
+                        count: 12 + draw,
+                        instancesCount: draw % 4,
+                        start: draw * 12,
+                        indirectDrawBuffer: draw % 4 >= 2 ? createResource<GPUBuffer>(2 ** 48 + 501) : null,
+                        indirectDrawByteOffset: 2 ** 34 + draw * 20,
+                    };
+                    const command = draw % 2 ? createCommand(common) : createNonIndexedCommand(common);
+                    expect(streams[index].tryAppend(command)).toBe(true);
+                }
+                expect(streams[index].flush()).toBe(true);
+                expect(streams[index].flush()).toBe(false);
+            }
+            expect(candidate.records).toEqual(control.records);
+            expect(candidate.records.at(-1)?.drawCount).toBe(24);
+        }
+    });
+
+    it("reserves once per accepted draw and reuses the allocation after warmup", () => {
+        const { renderPass, records } = createRecordingRenderPass();
+        const stream = createStream();
+        const internals = stream as unknown as { _commandWords: Uint32Array; _ensureCapacity: (words: number) => void };
+        const reserve = vi.spyOn(internals, "_ensureCapacity");
+        const command = createCommand({ renderPass });
+
+        for (let draw = 0; draw < 50; draw++) {
+            expect(stream.tryAppend(command)).toBe(true);
+        }
+        expect(reserve).toHaveBeenCalledTimes(50);
+        const allocation = internals._commandWords;
+        stream.flush();
+        for (let draw = 0; draw < 50; draw++) {
+            expect(stream.tryAppend(command)).toBe(true);
+        }
+        stream.flush();
+
+        expect(internals._commandWords).toBe(allocation);
+        expect(reserve).toHaveBeenCalledTimes(100);
+        expect(records[1].words).toEqual(records[0].words);
+        expect(stream.tryAppend(createCommand({ renderPass, pipeline: createResource<GPURenderPipeline>(0) }))).toBe(false);
+        expect(reserve).toHaveBeenCalledTimes(100);
+    });
+
+    it.each([1, 2 ** 32 - 1, 2 ** 32, 2 ** 32 + 1, 2 ** 48 + 123, Number.MAX_SAFE_INTEGER])("preserves both resource ID words for %s", (id) => {
+        const { renderPass, records } = createRecordingRenderPass();
+        const stream = createStream();
+        expect(stream.tryAppend(createCommand({ renderPass, pipeline: createResource<GPURenderPipeline>(id) }))).toBe(true);
+        stream.flush();
+
+        expect(records[0].words.slice(0, 3)).toEqual([WebGPURenderPassCommandOpcode.setPipeline, Number(BigInt(id) & 0xffffffffn), Number(BigInt(id) >> 32n)]);
+        expect(records[0].wordCount).toBe(records[0].words.length);
+    });
+
     it("bounds a batch to the maximum draw count and re-emits state in the next batch", () => {
         const { renderPass, records } = createRecordingRenderPass();
         const stream = createStream();
