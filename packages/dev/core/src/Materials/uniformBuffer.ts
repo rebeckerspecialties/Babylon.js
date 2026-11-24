@@ -677,7 +677,7 @@ export class UniformBuffer {
     }
 
     private _buffersEqual(buf1: Float32Array, buf2: Float32Array): boolean {
-        for (let i = 0; i < buf1.length; ++i) {
+        for (let i = 0, length = buf1.length; i < length; ++i) {
             if (buf1[i] !== buf2[i]) {
                 return false;
             }
