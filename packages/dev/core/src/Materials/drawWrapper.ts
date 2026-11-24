@@ -91,6 +91,8 @@ export class DrawWrapper {
      * of two active cameras) takes another one for each render, on the same draw contexts
      */
     public _recordedSceneUbo: Nullable<object> = null;
+    /** @internal The shared material GPU buffer referenced by the recorded bind groups. */
+    public _recordedMaterialBuffer: Nullable<object> = null;
     /**
      * @internal The vertex buffers of the geometry and of the thin instances, each with the GPU buffer it binds, where it is read and
      * its hash code (the vertex layout of the pipeline)

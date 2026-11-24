@@ -2842,7 +2842,8 @@ export class Mesh extends AbstractMesh implements IGetSetVerticesData {
             drawWrapper._recordedIndexBuffer !== this._getDrawnIndexBuffer() ||
             drawWrapper._recordedInstances !== this._getDrawnInstanceCount() ||
             drawWrapper._recordedSceneUbo !== this.getScene().getSceneUniformBuffer() ||
-            !this._areSharedBuffersFirst(effectiveMesh, withLights)
+            drawWrapper._recordedMaterialBuffer !== material._uniformBuffer.getBuffer() ||
+            !this._areSharedBuffersFirst(effectiveMesh, withLights, material)
         ) {
             return false;
         }
@@ -2895,17 +2896,23 @@ export class Mesh extends AbstractMesh implements IGetSetVerticesData {
     }
 
     /**
-     * Whether the shared uniform buffers a draw binds (the scene's, the mesh's and the lights') are on the first buffer of their frame.
+     * Whether the shared uniform buffers a draw binds (scene, mesh, material and lights) are on the first buffer of their frame.
      * A draw recorded with a later one depends on the order of the frame's writes, and one encoded again while a buffer moved on (written
      * again by an earlier pass of the frame) would bind the first buffer, with the earlier values, where a full draw binds the new one.
      * Never in floating origin mode, where a bind writes the world matrix minus the eye in the mesh's uniform buffer
      * @param effectiveMesh the mesh providing the world matrix and the lights
      * @param withLights whether the draw binds the lights
+     * @param material the material providing the shared uniform values
      * @returns true if they all are
      */
-    private _areSharedBuffersFirst(effectiveMesh: AbstractMesh, withLights: boolean): boolean {
+    private _areSharedBuffersFirst(effectiveMesh: AbstractMesh, withLights: boolean, material: Material): boolean {
         const scene = this.getScene();
-        if (scene.floatingOriginMode || !scene.getSceneUniformBuffer()._isFirstBufferBound() || !effectiveMesh.getMeshUniformBuffer()._isFirstBufferBound()) {
+        if (
+            scene.floatingOriginMode ||
+            !scene.getSceneUniformBuffer()._isFirstBufferBound() ||
+            !effectiveMesh.getMeshUniformBuffer()._isFirstBufferBound() ||
+            !material._uniformBuffer._isFirstBufferBound()
+        ) {
             return false;
         }
         if (withLights) {
@@ -2989,7 +2996,7 @@ export class Mesh extends AbstractMesh implements IGetSetVerticesData {
         domainState = 0
     ): void {
         const scene = this.getScene();
-        const kept = scene.getEngine()._canKeepRecordedDraw(drawWrapper) && this._areSharedBuffersFirst(effectiveMesh, withLights);
+        const kept = scene.getEngine()._canKeepRecordedDraw(drawWrapper) && this._areSharedBuffersFirst(effectiveMesh, withLights, material);
         // the per-draw values this full bind wrote: the reference of this frame for the draws of this material with this effect
         material._keepRecordedDrawReference(drawWrapper.effect!, kept ? drawWrapper : null, domain);
         if (!kept) {
@@ -3013,6 +3020,7 @@ export class Mesh extends AbstractMesh implements IGetSetVerticesData {
         drawWrapper._recordedDomainState = this._getConfiguredState(domainState);
         drawWrapper._recordedIndexBuffer = this._getDrawnIndexBuffer();
         drawWrapper._recordedSceneUbo = scene.getSceneUniformBuffer();
+        drawWrapper._recordedMaterialBuffer = material._uniformBuffer.getBuffer();
         const recordedVertexBuffers = (drawWrapper._recordedVertexBuffers ??= []);
         recordedVertexBuffers.length = 0;
         const vertexBuffers = this._geometry?.getVertexBuffers();
@@ -3130,6 +3138,7 @@ export class Mesh extends AbstractMesh implements IGetSetVerticesData {
                 subMesh.getMaterial()!._setStates(recordedDrawWrapper._recordedReverse);
                 engine._replayRecordedDraw(recordedDrawWrapper);
                 this._uniformBuffer._markBufferUsed();
+                subMesh.getMaterial()!._uniformBuffer._markBufferUsed();
                 for (const step of scene._afterRenderingMeshStage) {
                     step.action(this, subMesh, batch, recordedEffect);
                 }
