@@ -625,6 +625,33 @@ export class WebGPUEngine extends ThinWebGPUEngine {
     }
 
     /**
+     * Asynchronous pipeline creation (off by default). When enabled, a draw of a mesh whose render pipeline is not created yet is
+     * omitted while the pipeline is created asynchronously (one creation per pipeline configuration, shared with preWarmPipeline),
+     * instead of creating it synchronously in the frame. The mesh is omitted in all of its passes (shadow maps, depth, main pass...)
+     * from the frame one of its draws had to wait until a frame in which none did. Meanwhile, a render target refreshed every N frames
+     * renders in every frame, up to the frame in which the mesh is drawn again (two frames after the last wait: that recovery frame
+     * included), so that it shows the mesh in the same frames as the other passes. That is the case of every such render target of the
+     * engine, including those that do not draw the meshes that wait: while pipelines are created, these extra renders are the cost of
+     * the option. A pass that nothing renders again (a render target or a frame graph task with REFRESHRATE_RENDER_ONCE, such as a GPU
+     * picking; an object renderer rendered by a direct call to render() that its shouldRender() did not ask for, such as the
+     * voxelization of IBL shadows or a decal of MeshUVSpaceRenderer; a screenshot through a render target) draws every mesh, creating
+     * the pipelines it lacks synchronously. Limitation:
+     * in the frame of that first wait, the passes rendered before it have already drawn the mesh, so that frame can show the mesh in
+     * some of its passes only (the shadow of a mesh whose main pass draw waits, for instance). Other draws (the bounding boxes of
+     * occlusion queries, post-processes, sprites, particles...) still create their pipelines synchronously. A snapshot recorded while
+     * draws were omitted is replayed until their pipelines are created, then recorded again.
+     */
+    public asynchronousPipelineCreation = false;
+
+    // pipelines a snapshot recording had to wait for: the snapshot is recorded again once they are all created
+    private _snapshotPendingPipelines = new Set<Promise<GPURenderPipeline>>();
+    private _snapshotRecordAgain = false;
+    // a recording held back draws whose pipelines are ready (for the other passes of their mesh)
+    private _snapshotHeldBack = false;
+    // bumped when the pending creations no longer apply (device lost, engine disposed)
+    private _pendingPipelinesGeneration = 0;
+
+    /**
      * When true (default), the "leftover" uniform buffer of an effect (the buffer that holds the uniforms not declared in a named
      * uniform block) keeps one GPU buffer per draw context, so a given draw call always binds the same buffer for a given effect.
      * When false, the GPU buffers are assigned in draw order: the buffer bound by a draw call then changes with the order in which
@@ -652,7 +679,9 @@ export class WebGPUEngine extends ThinWebGPUEngine {
      * @returns true if all effects are ready
      */
     public areAllEffectsReady(): boolean {
-        return true;
+        // with asynchronous pipeline creation, a pipeline this engine waits for is a draw not done yet (the creations of another engine
+        // are not this engine's)
+        return !this.asynchronousPipelineCreation || !this._cacheRenderPipeline || this._cacheRenderPipeline.numAwaitedPipelines === 0;
     }
 
     /**
@@ -1166,6 +1195,7 @@ export class WebGPUEngine extends ThinWebGPUEngine {
             supportMSAA: true,
             supportSSAO2: true,
             supportIBLShadows: true,
+            supportMeshBlending: true,
             supportExtendedTextureFormats: true,
             supportSwitchCaseInShader: true,
             supportSyncTextureRead: false,
@@ -1425,6 +1455,7 @@ export class WebGPUEngine extends ThinWebGPUEngine {
     protected override _restoreEngineAfterContextLost(initEngine: () => void | Promise<void>) {
         WebGPUCacheRenderPipelineTree.ResetCache();
         WebGPUCacheBindGroups.ResetCache();
+        this._forgetPendingPipelines();
 
         // Clear the draw wrappers and material contexts
         const cleanScenes = (scenes: Scene[]) => {
@@ -1827,6 +1858,83 @@ export class WebGPUEngine extends ThinWebGPUEngine {
                 this._applyScissor(!this.compatibilityMode ? this._bundleList : null);
                 this._clearFullQuad(backBuffer ? color : null, depth, stencil);
             }
+        }
+    }
+
+    /** @internal */
+    public override _beginRenderingGroups(): void {
+        this._snapshotRendering.beginClearSequence();
+    }
+
+    /** @internal */
+    public override _endRenderingGroups(): void {
+        this._snapshotRendering.endClearSequence(!!this._currentRenderPass);
+    }
+
+    /** @internal */
+    public override _clearBetweenRenderingGroups(depth: boolean, stencil: boolean): void {
+        // what the clear below does to the render passes, which fast snapshot rendering does again without rendering the groups
+        this._snapshotRendering.recordedClears?.push({
+            depth,
+            stencil,
+            passWasOpen: !!this._currentRenderPass,
+            scissor: this._scissorIsActive() ? [this._scissorCached.x, this._scissorCached.y, this._scissorCached.z, this._scissorCached.w] : null,
+        });
+        this.clear(null, false, depth, stencil);
+    }
+
+    /** @internal */
+    public override _issueRenderingGroupClearsAgain(): void {
+        const sequence = this._snapshotRendering.nextClearSequence();
+        if (!sequence) {
+            return;
+        }
+
+        const clears = sequence.clears;
+        for (let index = 0; index < clears.length; index++) {
+            const clear = clears[index];
+
+            if ((clear.passWasOpen || clear.scissor) && !this._currentRenderPass) {
+                // the render pass the clear was issued in: draws that are not issued again had opened it, or the clear itself
+                this._getCurrentRenderPass();
+            }
+
+            if (clear.stencil) {
+                this._clearStencilValue = 0;
+            }
+
+            const scissor = clear.scissor;
+            if (!scissor) {
+                // the clear ended the render pass and started the next one, which the next bundle list was recorded in
+                if (this._currentRenderTarget) {
+                    this._startRenderTargetRenderPass(this._currentRenderTarget, true, null, clear.depth, clear.stencil);
+                } else {
+                    this._startMainRenderPass(true, null, clear.depth, clear.stencil);
+                }
+            } else if (this.compatibilityMode) {
+                // the clear was drawn in the render pass with the scissor of the recorded frame. Outside of the compatibility mode,
+                // the draw is in the bundle list.
+                const cached = this._scissorCached;
+                const x = cached.x;
+                const y = cached.y;
+                const z = cached.z;
+                const w = cached.w;
+                cached.x = scissor[0];
+                cached.y = scissor[1];
+                cached.z = scissor[2];
+                cached.w = scissor[3];
+                this._applyScissor(null);
+                this._clearFullQuad(null, clear.depth, clear.stencil);
+                cached.x = x;
+                cached.y = y;
+                cached.z = z;
+                cached.w = w;
+            }
+        }
+
+        if (sequence.passWasOpenAtEnd && !this._currentRenderPass) {
+            // draws that are not issued again had opened the render pass, which what is issued next ends
+            this._getCurrentRenderPass();
         }
     }
 
@@ -2396,6 +2504,11 @@ export class WebGPUEngine extends ThinWebGPUEngine {
 
         if (shaderLanguage === ShaderLanguage.GLSL && !this._glslangAndTintAreFullyLoaded) {
             await this.prepareGlslangAndTintAsync();
+
+            if (webGpuContext.isDisposed) {
+                // the effect was released while the shader translators were loading: building its resources now would leak them
+                return;
+            }
         }
 
         if (this.dbgShowShaderCode) {
@@ -2512,10 +2625,20 @@ export class WebGPUEngine extends ThinWebGPUEngine {
     public _releaseEffect(effect: Effect): void {
         if (this._compiledEffects[effect._key]) {
             delete this._compiledEffects[effect._key];
-
-            this._deletePipelineContext(effect.getPipelineContext() as WebGPUPipelineContext);
+        }
+        if (this._releasingEffects) {
+            // releaseEffects() only flushes the cache: the effects it releases can still be in use (materials keep rendering with them,
+            // the clear quad and recorded snapshot bundles reference their uniform buffers), so their resources must stay alive
+            return;
+        }
+        const pipelineContext = effect.getPipelineContext();
+        if (pipelineContext) {
+            this._deletePipelineContext(pipelineContext);
         }
     }
+
+    // true while releaseEffects() notifies the effects it releases (see _releaseEffect)
+    private _releasingEffects = false;
 
     /**
      * Force the engine to release all cached effects. This means that next effect compilation will have to be done completely even if a similar effect was already compiled
@@ -2523,18 +2646,26 @@ export class WebGPUEngine extends ThinWebGPUEngine {
     public releaseEffects() {
         for (const name in this._compiledEffects) {
             const webGPUPipelineContext = this._compiledEffects[name].getPipelineContext() as WebGPUPipelineContext;
-            this._deletePipelineContext(webGPUPipelineContext);
+            if (webGPUPipelineContext) {
+                resetCachedPipeline(webGPUPipelineContext);
+            }
         }
 
         this._compiledEffects = {};
 
-        this.onReleaseEffectsObservable.notifyObservers(this);
+        this._releasingEffects = true;
+        try {
+            this.onReleaseEffectsObservable.notifyObservers(this);
+        } finally {
+            this._releasingEffects = false;
+        }
     }
 
     public _deletePipelineContext(pipelineContext: IPipelineContext): void {
         const webgpuPipelineContext = pipelineContext as WebGPUPipelineContext;
         if (webgpuPipelineContext) {
             resetCachedPipeline(webgpuPipelineContext);
+            webgpuPipelineContext.dispose();
         }
     }
 
@@ -3379,6 +3510,12 @@ export class WebGPUEngine extends ThinWebGPUEngine {
      */
     public override beginFrame(): void {
         this._measureFps();
+        if (this._snapshotRecordAgain) {
+            this._snapshotRecordAgain = false;
+            if (this._snapshotRendering.enabled) {
+                this._snapshotRendering.reset();
+            }
+        }
         super.beginFrame();
     }
 
@@ -3387,6 +3524,14 @@ export class WebGPUEngine extends ThinWebGPUEngine {
      */
     public override endFrame() {
         this._endCurrentRenderPass();
+
+        if (this._snapshotHeldBack) {
+            // draws were held back for their mesh, and no pipeline the snapshot waits for will record it again: record the next frame
+            this._snapshotHeldBack = false;
+            if (this._snapshotPendingPipelines.size === 0) {
+                this._snapshotRendering.invalidateRecording();
+            }
+        }
 
         this._snapshotRendering.endFrame();
 
@@ -4108,6 +4253,48 @@ export class WebGPUEngine extends ThinWebGPUEngine {
         }
     }
 
+    // A draw of a mesh that waits for its render pipeline (asynchronous pipeline creation): omitted while the pipeline is created,
+    // and in all the passes of its mesh until a frame in which none of its draws waited, so that the passes show the mesh together
+    // (only the passes drawn before the first wait, in that frame, show it alone)
+    private _omitDraw(owner: { _pipelinePendingFrameId: number; _pipelineDrawnFrameId: number }, pipeline: Nullable<GPURenderPipeline>, bundleList: WebGPUBundleList): void {
+        if (!pipeline) {
+            owner._pipelinePendingFrameId = this._lastPipelineWaitFrameId = this.frameId;
+        }
+        if (!this._snapshotRendering.record) {
+            return;
+        }
+
+        bundleList.numDrawCalls--;
+
+        const pending = pipeline ? null : this._cacheRenderPipeline.lastPendingPipeline;
+        if (!pending) {
+            // ready, held back for the other passes of its mesh (see endFrame)
+            this._snapshotHeldBack = true;
+        } else if (owner._pipelineDrawnFrameId === this.frameId) {
+            // an earlier pass drew the mesh in this frame: a snapshot must not replay it in some passes only, record the next frame
+            this._snapshotRendering.invalidateRecording();
+        } else if (!this._snapshotPendingPipelines.has(pending)) {
+            // the snapshot is replayed without the draw while its pipeline is created, and recorded again once all are created
+            this._snapshotPendingPipelines.add(pending);
+            const generation = this._pendingPipelinesGeneration;
+            const created = () => {
+                if (generation === this._pendingPipelinesGeneration && this._snapshotPendingPipelines.delete(pending) && this._snapshotPendingPipelines.size === 0) {
+                    this._snapshotRecordAgain = true;
+                }
+            };
+            // eslint-disable-next-line github/no-then
+            pending.then(created, created);
+        }
+    }
+
+    private _forgetPendingPipelines(): void {
+        this._pendingPipelinesGeneration++;
+        this._cacheRenderPipeline?._forgetAwaitedPipelines();
+        this._snapshotPendingPipelines.clear();
+        this._snapshotRecordAgain = false;
+        this._snapshotHeldBack = false;
+    }
+
     // A bit for each texture of the shader that is a depth texture, or a float texture the device can't filter linearly: a draw that binds
     // one uses a pipeline of its own (see WebGPUMaterialContext.textureState). The draws and createRenderPipelineAsync both derive it here.
     private _getTextureState(webgpuPipelineContext: WebGPUPipelineContext, materialContext: WebGPUMaterialContext): number {
@@ -4176,6 +4363,13 @@ export class WebGPUEngine extends ThinWebGPUEngine {
         if (useFastPath || this._snapshotRendering.record) {
             this._applyRenderPassChanges(bundleList);
             if (!this._snapshotRendering.record) {
+                if (this.asynchronousPipelineCreation && this._drawsMayWait && this._lastPipelineWaitFrameId >= this.frameId - 1) {
+                    const waitOwner = this._pipelineWaitOwner;
+                    if (waitOwner && waitOwner._pipelinePendingFrameId >= this.frameId - 1) {
+                        // the bundle of this draw exists, but its mesh waits for the pipeline of another pass
+                        return;
+                    }
+                }
                 this._counters.numBundleReuseNonCompatMode++;
                 // the arguments of a bound application buffer are written on the GPU: the CPU does not touch them
                 if (this._currentDrawContext.indirectDrawBuffer && !this._currentDrawContext._externalIndirectDrawBuffer) {
@@ -4194,7 +4388,24 @@ export class WebGPUEngine extends ThinWebGPUEngine {
 
         this._currentMaterialContext.textureState = textureState;
 
-        const pipeline = this._cacheRenderPipeline.getRenderPipeline(fillMode, this._currentEffect!, this.currentSampleCount, textureState);
+        let pipeline: Nullable<GPURenderPipeline>;
+        // only the draw of a mesh waits (Mesh._processRendering gives it its owner), and only in a pass rendered again in the next frames:
+        // a pass rendered once draws every mesh, and no other draw (the bounding box of an occlusion query, a post-process...) ever waits
+        const waitOwner = this.asynchronousPipelineCreation && this._drawsMayWait ? this._pipelineWaitOwner : null;
+        if (waitOwner) {
+            pipeline = this._cacheRenderPipeline.tryGetRenderPipeline(fillMode, this._currentEffect!, this.currentSampleCount, textureState);
+            // the state of the mesh is only read while draws waited (in this frame or the previous one)
+            if (!pipeline || (this._lastPipelineWaitFrameId >= this.frameId - 1 && waitOwner._pipelinePendingFrameId >= this.frameId - 1)) {
+                this._omitDraw(waitOwner, pipeline, bundleList);
+                return;
+            }
+            if (this._snapshotRendering.record) {
+                // tells a coherent recording from one in which an earlier pass drew the mesh (see _omitDraw)
+                waitOwner._pipelineDrawnFrameId = this.frameId;
+            }
+        } else {
+            pipeline = this._cacheRenderPipeline.getRenderPipeline(fillMode, this._currentEffect!, this.currentSampleCount, textureState);
+        }
 
         const bindGroups = this._cacheBindGroups.getBindGroups(webgpuPipelineContext, this._currentDrawContext, this._currentMaterialContext);
         const vertexBuffers = this._cacheRenderPipeline.vertexBuffers;
@@ -4369,7 +4580,7 @@ export class WebGPUEngine extends ThinWebGPUEngine {
     }
 
     /** @internal */
-    public override _canEncodeRecordedDraw(drawWrapper: DrawWrapper): boolean {
+    public override _canEncodeRecordedDraw(drawWrapper: DrawWrapper, waitOwner: Nullable<{ _pipelinePendingFrameId: number; _pipelineDrawnFrameId: number }> = null): boolean {
         const drawContext = drawWrapper.drawContext as Nullable<WebGPUDrawContext>;
         const materialContext = drawWrapper.materialContext as Nullable<WebGPUMaterialContext>;
         const draw = drawContext?._recordedDraw;
@@ -4393,16 +4604,30 @@ export class WebGPUEngine extends ThinWebGPUEngine {
         ) {
             return false;
         }
+        // a mesh that waits for a render pipeline in one of its passes is left out of all of them (see _draw): its full draw does it
+        if (
+            waitOwner &&
+            this.asynchronousPipelineCreation &&
+            this._drawsMayWait &&
+            this._lastPipelineWaitFrameId >= this.frameId - 1 &&
+            waitOwner._pipelinePendingFrameId >= this.frameId - 1
+        ) {
+            return false;
+        }
         return true;
     }
 
     /** @internal */
-    public override _replayRecordedDraw(drawWrapper: DrawWrapper): boolean {
-        if (!this._canEncodeRecordedDraw(drawWrapper)) {
+    public override _replayRecordedDraw(drawWrapper: DrawWrapper, waitOwner: Nullable<{ _pipelinePendingFrameId: number; _pipelineDrawnFrameId: number }> = null): boolean {
+        if (!this._canEncodeRecordedDraw(drawWrapper, waitOwner)) {
             return false;
         }
         const drawContext = drawWrapper.drawContext as WebGPUDrawContext;
         const draw = drawContext._recordedDraw!;
+        // drawn while recording, as a full draw marks it: a later pass whose pipeline the mesh waits for records the next frame (see _omitDraw)
+        if (waitOwner && this.asynchronousPipelineCreation && this._drawsMayWait) {
+            waitOwner._pipelineDrawnFrameId = this.frameId;
+        }
         // the bind groups reference the slot of the draw context: used this frame, it is neither overwritten nor taken by another one
         (drawWrapper.effect?._pipelineContext as Nullable<WebGPUPipelineContext>)?.uniformBuffer?._markOwnerSlotUsed(drawContext);
 
@@ -4610,6 +4835,9 @@ export class WebGPUEngine extends ThinWebGPUEngine {
         this._isDisposed = true;
         // the commands not submitted yet never will be: their readbacks go on, and return nothing
         this._resolveSubmitted?.();
+        // pipelines still being created complete into nothing
+        this._pendingPipelinesGeneration++;
+        this._cacheRenderPipeline?._forgetAwaitedPipelines();
         this.hideLoadingUI?.();
         this._timestampQuery?.dispose();
         this._mainTexture?.destroy();
